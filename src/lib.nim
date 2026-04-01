@@ -24,11 +24,11 @@ proc grabUppercase(s: string): string =
     if c.isUpperAscii():
       result.add c.toLowerAscii()
 
-macro World[T: tuple](compEnumName: static string, _: typedesc[T]): untyped =
+macro declareWorld[T: tuple](worldName: static string, _: typedesc[T]): untyped =
   const sparseSetTy = bindSym"SparseSet"
 
   var
-    enumName = ident(compEnumName & "ComponentKind")
+    enumName = ident(worldName & "ComponentKind")
     fieldList = newNimNode(nnkRecList).add(
       newIdentDefs(
         ident("generations"),
@@ -48,7 +48,7 @@ macro World[T: tuple](compEnumName: static string, _: typedesc[T]): untyped =
   let tupleTy = T.getTypeImpl
   for identDef in tupleTy:
     enumTy.add(ident(
-      [grabUppercase(compEnumName), "c", $identDef[0].strVal[0].toUpperAscii(),
+      [grabUppercase(worldName), "c", $identDef[0].strVal[0].toUpperAscii(),
       identDef[0].strVal[1..^1]].join()
     ))
     fieldList.add newIdentDefs(
@@ -56,7 +56,7 @@ macro World[T: tuple](compEnumName: static string, _: typedesc[T]): untyped =
       newNimNode(nnkBracketExpr).add(sparseSetTy, identDef[1])
     )
 
-  let innerWorld = genSym("InnerWorld")
+  let worldTy = ident(worldName)
 
   if enumTy.len == 1:
     error("World must have at least one component!", T.getTypeImpl)
@@ -73,19 +73,19 @@ macro World[T: tuple](compEnumName: static string, _: typedesc[T]): untyped =
         enumTy
       ),
       newNimNode(nnkTypeDef).add(
-        innerWorld,
+        newNimNode(nnkPostfix).add(
+          ident("*"),
+          worldTy
+        ),
         newEmptyNode(),
         newNimNode(nnkObjectTy).add(
           newEmptyNode(), newEmptyNode(), fieldList
         )
       )
-    ),
-    innerWorld
+    )
   )
 
   echo treeRepr(result)
   echo repr(result)
 
-type
-  Test = World("Test", tuple[a: int, b, c: string])
-
+declareWorld("Test", tuple[a: int, b, c: string])
