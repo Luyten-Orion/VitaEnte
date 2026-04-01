@@ -1,12 +1,18 @@
 ## A minimal sparse ECS implementation for Nimskull
 
 import std/[
-  macros,
-  strutils
+  strutils,
+  sequtils,
+  genasts,
+  macros
 ]
 
 type
   # Internal types
+  ComponentInfo = object
+    name: NimNode     # Field name in the tuple
+    kind: NimNode # The enum kind
+    typ: NimNode  # The type it represents
 
   # Public types
   Entity* = object
@@ -19,71 +25,63 @@ type
     when T isnot void:
       components: seq[T] # Data
 
-proc grabUppercase(s: string): string =
-  for c in s:
-    if c.isUpperAscii():
-      result.add c.toLowerAscii()
+proc grabUppercase(s: string): string = s.filter(isUpperAscii).join()
 
-macro declareWorld[T: tuple](worldName: static string, _: typedesc[T]): untyped =
-  const sparseSetTy = bindSym"SparseSet"
-
-  var
+macro declareWorld*[T: tuple](worldName: static string, _: typedesc[T]): untyped =
+  let 
+    tupleTy = T.getTypeImpl
     enumName = ident(worldName & "ComponentKind")
-    fieldList = newNimNode(nnkRecList).add(
-      newIdentDefs(
-        ident("generations"),
-        quote do: seq[uint32]
-      ),
-      newIdentDefs(
-        ident("freeIdxs"),
-        quote do: seq[uint32]
-      ),
-      newIdentDefs(
-        ident("sigs"),
-        quote do: seq[set[`enumName`]]
-      )
-    )
-    enumTy = newNimNode(nnkEnumTy).add(newEmptyNode())
+    worldTy = ident(worldName)
+    sparseSetTy = bindSym"SparseSet"
+    prefix = grabUppercase(worldName).toLowerAscii
+  
+  var components: seq[ComponentInfo]
 
-  let tupleTy = T.getTypeImpl
-  for identDef in tupleTy:
-    enumTy.add(ident(
-      [grabUppercase(worldName), "c", $identDef[0].strVal[0].toUpperAscii(),
-      identDef[0].strVal[1..^1]].join()
-    ))
-    fieldList.add newIdentDefs(
-      identDef[0],
-      newNimNode(nnkBracketExpr).add(sparseSetTy, identDef[1])
+  for i in 0..<tupleTy.len:
+    let 
+      f = tupleTy[i]
+      fName = f[0].strVal
+      kindName = ident(prefix & "c" & fName[0].toUpperAscii() & fName[1..^1])
+    
+    components.add ComponentInfo(
+      name: f[0],
+      kind: kindName,
+      typ: f[1]
     )
 
-  let worldTy = ident(worldName)
+  if components.len == 0:
+    error("A World requires at least one component to justify its existence.", tupleTy)
 
-  if enumTy.len == 1:
-    error("World must have at least one component!", T.getTypeImpl)
-    return
+  let enumFields = newNimNode(nnkEnumTy).add(newEmptyNode())
+  for c in components:
+    enumFields.add c.kind
 
-  result = newStmtList(
-    newNimNode(nnkTypeSection).add(
-      newNimNode(nnkTypeDef).add(
-        newNimNode(nnkPostfix).add(
-          ident("*"),
-          enumName
-        ),
-        newEmptyNode(),
-        enumTy
-      ),
-      newNimNode(nnkTypeDef).add(
-        newNimNode(nnkPostfix).add(
-          ident("*"),
-          worldTy
-        ),
-        newEmptyNode(),
-        newNimNode(nnkObjectTy).add(
-          newEmptyNode(), newEmptyNode(), fieldList
-        )
-      )
+  let
+    recList = newNimNode(nnkRecList).add(
+      newIdentDefs(ident("generations"), genAst(seq[uint32])),
+      newIdentDefs(ident("freeIdxs"),    genAst(seq[uint32])),
+      newIdentDefs(ident("sigs"),        genAst(enumName, seq[set[enumName]]))
     )
-  )
+
+    worldObj = newNimNode(nnkObjectTy).add(
+      newEmptyNode(),
+      newEmptyNode(),
+      recList
+    )
+
+  for c in components:
+    recList.add newIdentDefs(
+      c.name, 
+      newNimNode(nnkBracketExpr).add(sparseSetTy, c.typ)
+    )
+
+  # --- Final Assembly ---
+  result = genAst(enumName, enumFields, worldTy, worldObj):
+    type
+      enumName* = enumFields
+
+      worldTy* = worldObj
+
 
   echo treeRepr(result)
   echo repr(result)
