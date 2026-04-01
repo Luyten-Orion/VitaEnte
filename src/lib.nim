@@ -75,7 +75,6 @@ macro declareWorld*[T: tuple](worldName: static string, _: typedesc[T]): untyped
       newNimNode(nnkBracketExpr).add(sparseSetTy, c.typ)
     )
 
-  # --- Final Assembly ---
   result = genAst(enumName, enumFields, worldTy, worldObj):
     type
       enumName* = enumFields
