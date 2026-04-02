@@ -5,13 +5,13 @@ import std/[
   sequtils,
   genasts,
   macros,
-  locks
+  tables
 ]
 
 type
   # Internal types
   ComponentInfo = object
-    name: NimNode     # Field name in the tuple
+    name: NimNode # Field name in the tuple
     kind: NimNode # The enum kind
     typ: NimNode  # The type it represents
 
@@ -21,74 +21,108 @@ type
     gen: uint32
 
   SparseSet*[T] = object 
-    smap: seq[int32]   # Entity -> Dense
+    smap: seq[uint32]   # Entity -> Dense
     dmap: seq[Entity]  # Dense -> Entity
     when T isnot void:
       components: seq[T] # Data
 
+const Sentinel = high(uint32)
+
 # SparseSet helpers
 proc contains*[T](ss: SparseSet[T], e: Entity): bool {.inline.} =
-  ## Check if an entity exists within this specific component set.
-  assert e.id < uint32(ss.smap.len), "The `id` of Entity is bigger than what we support!"
-  e.id in ss.smap
+  ## Determine if the entity exists within this component storage.
+  e.id < ss.smap.len.uint32 and ss.smap[e.id] != Sentinel
 
 proc add*[T](ss: var SparseSet[T], e: Entity, val: T) =
-  ## Add a component to an entity. Adjusts sparse map lazily.
+  ## Add a component to an entity.
   if e in ss: return
 
-  # Grow sparse map if necessary
+  # Lazy growth: Fill new slots with the Sentinel
   if e.id >= ss.smap.len.uint32:
     let oldLen = ss.smap.len
     ss.smap.setLen(e.id + 1)
     for i in oldLen .. e.id.int:
-      ss.smap[i] = -1
+      ss.smap[i] = Sentinel
 
-  # Link Sparse -> Dense
-  ss.smap[e.id] = ss.dmap.len.int32
+  # Map the Entity ID to the current end of the dense array
+  ss.smap[e.id] = ss.dmap.len.uint32
   ss.dmap.add(e)
   
   when T isnot void:
     ss.components.add(val)
 
+proc add*[T: void](ss: var SparseSet[T], e: Entity) =
+  ## Add a 'tag' component (no data) to an entity.
+  if e in ss: return
+
+  if e.id >= ss.smap.len.uint32:
+    let oldLen = ss.smap.len
+    ss.smap.setLen(e.id + 1)
+    for i in oldLen .. e.id.int:
+      ss.smap[i] = Sentinel
+
+  ss.smap[e.id] = ss.dmap.len.uint32
+  ss.dmap.add(e)
+
 proc del*[T](ss: var SparseSet[T], e: Entity) =
+  ## Remove the component via swap-and-pop to maintain a packed dense array.
   if e notin ss: return
 
   let 
     idxToRemove = ss.smap[e.id]
     lastEntity = ss.dmap[^1]
 
+  # Move the last entity's metadata to the hole we just created
   ss.dmap[idxToRemove] = lastEntity
   ss.smap[lastEntity.id] = idxToRemove
   
   when T isnot void:
+    # Move the last component data to the hole
     ss.components[idxToRemove] = ss.components[^1]
     ss.components.setLen(ss.components.len - 1)
 
+  # Shrink the dense map and reset the sparse entry
   ss.dmap.setLen(ss.dmap.len - 1)
-  ss.smap[e.id] = -1
+  ss.smap[e.id] = Sentinel
 
 template `[]`*[T](ss: SparseSet[T], e: Entity): T =
-  ## Access a component. Asserts existance in debug builds.
-  assert e in ss, "Entity does not possess this component"
+  ## Direct access to component data.
+  assert e in ss, "Attempted to access non-existent component for Entity " & $e.id
   ss.components[ss.smap[e.id]]
 
 template `[]=`*[T](ss: var SparseSet[T], e: Entity, val: T) =
-  ## Update a component value.
-  assert e in ss, "Entity does not possess this component"
+  ## Direct update of component data.
+  assert e in ss, "Attempted to assign to non-existent component for Entity " & $e.id
   ss.components[ss.smap[e.id]] = val
 
-
+# Helpers
 proc grabUppercase(s: string): string = s.filter(isUpperAscii).join()
 
+macro yieldIteratorImpl(typ: typed, call: untyped): untyped =
+  let arg = ident"arg"
+  result = nnkForStmt.newTree(arg)
+  let yieldedTup = nnkTupleConstr.newTree()
+
+  for i, _ in typ.getTypeInst[^1]:
+    yieldedTup.add nnkBracketExpr.newTree(arg, newLit i)
+
+  result.add call
+  result.add nnkYieldStmt.newTree(yieldedTup)
+
+
+template yieldIterator(call: untyped): untyped =
+  yieldIteratorImpl(typeof(call), call)
+
+proc newLit(n: NimNode): NimNode =
+  newCall(bindSym"quote", newStmtList(n))
+
+# The main meat
 macro declareWorld*[T: tuple](
   worldName: static string,
-  mt: static bool,
   _: typedesc[T]
 ): untyped =
   ## Declares the world type as well as various helpers for the world.
-  ## - `worldName` is the name of the generated type and its corrosponding enum
-  ## - `mt` is whether the world will be used in a multithreaded context
-  ##   (so a `lock` field can be created for thread safety)
+  ## - `worldName` is the name of the generated type and its corrosponding enu
   ## - `T` is components, passed as a tuple type. Component names are generated
   ##   from the tuple field names, with the corrosponding type.
   let 
@@ -98,7 +132,9 @@ macro declareWorld*[T: tuple](
     sparseSetTy = bindSym"SparseSet"
     prefix = grabUppercase(worldName).toLowerAscii
   
-  var components: seq[ComponentInfo]
+  var
+    components: seq[ComponentInfo]
+    componentEnumMap: seq[(string, string)]
 
   for i in 0..<tupleTy.len:
     let 
@@ -111,6 +147,7 @@ macro declareWorld*[T: tuple](
       kind: kindName,
       typ: f[1]
     )
+    componentEnumMap.add (kindName.strVal, fName)
 
   if components.len == 0:
     error("A World requires at least one component to justify its existence.", tupleTy)
@@ -132,31 +169,27 @@ macro declareWorld*[T: tuple](
       recList
     )
 
-  if mt:
-    recList.add(newIdentDefs(
-      ident("wlock"),
-      bindSym"Lock"
-    ))
-
   for c in components:
     recList.add newIdentDefs(
       c.name, 
       newNimNode(nnkBracketExpr).add(sparseSetTy, c.typ)
     )
 
+  let scem = genSym("compEnumMap")
+
   result = genAstOpt(
-    {kDirtyTemplate}, enumName, enumFields, worldTy, worldObj, isMtWorld=mt
+    {kDirtyTemplate}, enumName, enumFields, worldTy, worldObj, componentEnumMap,
+    scem, components
   ):
     type
-      enumName* = enumFields
+      enumName* {.pure.}  = enumFields
       worldTy* = worldObj
+
+    const scem = componentEnumMap.toTable
 
     proc spawn*(w: var worldTy): Entity =
       ## Creates or reuses a dead entity in the world.
       var id = 0'u32
-
-      when isMtWorld:
-        w.wlock.acquire()
 
       if w.freeIdxs.len > 0:
         id = w.freeIdxs.pop()
@@ -164,18 +197,93 @@ macro declareWorld*[T: tuple](
         id = w.generations.len.uint32
         w.generations.add(0)
         w.sigs.add({})
-      
-      when isMtWorld:
-        w.wlock.release()
 
       result = Entity(id: id, gen: w.generations[id])
-      inc w.generations[id]
 
     proc contains*(w: worldTy, e: Entity): bool {.inline.} =
+      ## Returns whether the entity exists in the world.
       e.id < w.generations.len.uint32 and e.gen == w.generations[e.id]
+
+    proc signature*(w: worldTy, e: Entity): set[enumName] {.inline.} =
+      ## Returns the signature (the component set) of an entity
+      assert e in w, "Attempted to access a dead entity: " & $e.id
+      w.sigs[e.id]
+
+    template add*(w: var worldTy, e: Entity, enm: static enumName, val) =
+      ## Add a component to an entity, with a given value.
+      w.sigs[e.id].incl(enm)
+      for name, field in w.fieldPairs:
+        when scem[enm] == name:
+          field.add(e, val)
+
+    template add*(w: var worldTy, e: Entity, enm: static enumName) =
+      ## Add a component to an entity, without a value.
+      w.sigs[e.id].incl(enm)
+      for name, field in w.fieldPairs:
+        when scem[enm] == name:
+          field.add(e)
+    
+    proc kill*(w: var worldTy, e: Entity) =
+      ## Remove an entity from the world.
+      w.generations[e.id] += 1
+      w.sigs[e.id] = {}
+
+      for name, field in w.fieldPairs:
+        when field is SparseSet:
+          field.del(e)
+
+      w.freeIdxs.add(e.id)
+
+    macro tupRet(ro, rw: static set[enumName]): typedesc =
+      var tupleConstr = nnkTupleConstr.newTree(bindSym"Entity")
+
+      for c in ro:
+        echo c
+        echo components.mapIt((it.name.treeRepr, it.kind.treeRepr)).join(", ")
+        tupleConstr.add (
+          components.filterIt(it.kind.strVal == $c)[0].typ
+        )
+      
+      for c in rw:
+        tupleConstr.add newNimNode(nnKVarTy).add(
+          (components.filterIt(it.kind.strVal == $c)[0].typ)
+        )
+
+      result = tupleConstr
+
+    macro query*(
+      w: var worldTy,
+      readOnly, readWrite: static set[enumName] = {}
+    ): untyped =
+      ## Query the world for entities with the given components and act on them.
+      var tupleConstr = nnkTupleConstr.newTree(bindSym"Entity")
+
+      for c in readOnly:
+        echo c
+        echo components.mapIt((it.name.treeRepr, it.kind.treeRepr)).join(", ")
+        tupleConstr.add (
+          components.filterIt(it.kind.strVal == $c)[0].typ
+        )
+      
+      for c in readWrite:
+        tupleConstr.add newNimNode(nnKVarTy).add(
+          (components.filterIt(it.kind.strVal == $c)[0].typ)
+        )
+
+      result = genAst(tupleConstr):
+        iterator innerQuery(): tupleConstr =
+          yield default(tupleConstr)
+        
+        innerQuery
+
 
   echo treeRepr(result)
   echo repr(result)
 
 
-declareWorld("Test", true, tuple[a: int, b, c: string])
+declareWorld("Test", tuple[velocity, position: float])
+
+var a = Test()
+
+for e, v in a.query({tcVelocity})():
+  discard
