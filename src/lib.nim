@@ -230,7 +230,10 @@ macro declareWorld*[T: tuple](
 
       w.freeIdxs.add(e.id)
 
-    macro queryImpl(w: var worldTy, ro, rw: static openArray[enumName]): untyped =
+    macro queryImpl(
+      w: var worldTy,
+      ro, rw, exc: static openArray[enumName]
+    ): untyped =
       const cmpts = components
       var
         mask: set[enumName]
@@ -261,8 +264,19 @@ macro declareWorld*[T: tuple](
         let ttyp = cmpts.filterIt(it.kind.strVal == $c)[0].typ
         if ttyp.kind in {nnkIdent, nnkSym} and ttyp.strVal != "void":
           tupleConstr.add ttyp
-      
-      macro makeTupleRet(w: var worldTy, ro, rw: static openArray[enumName], i: uint32): untyped =
+
+      for c in exc:
+        if c in mask:
+          error(
+            "Can't exclude component `" & $c & "` from query when explicitly included!",
+            callsite()
+          )
+
+      macro makeTupleRet(
+        w: var worldTy,
+        ro, rw: static openArray[enumName],
+        i: uint32
+      ): untyped =
         var
           entitySym = genSym("ent")
           entDecl = genAst(entitySym, i):
@@ -302,13 +316,16 @@ macro declareWorld*[T: tuple](
       let
         rdo = @ro
         rwa = @rw
+        exl = toSet(exc)
 
-      result = genAst(w, rdo, rwa, mask):
+      result = genAst(w, rdo, rwa, exl, mask):
         for entityIdx in 0'u32..<uint32(w.sigs.len):
-          if w.sigs[entityIdx] * mask == mask:
+          if (
+            w.sigs[entityIdx] * exl == {} and w.sigs[entityIdx] * mask == mask
+          ):
             makeTupleRet(w, rdo, rwa, entityIdx)
 
     iterator query*(
       w: var worldTy,
-      readOnly, readWrite: static openArray[enumName] = []
-    ): auto = w.queryImpl(readOnly, readWrite)
+      readOnly, readWrite, exclude: static openArray[enumName] = []
+    ): auto = w.queryImpl(readOnly, readWrite, exclude)
