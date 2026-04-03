@@ -174,6 +174,8 @@ macro declareWorld*[T: tuple](
       import std/genasts
     when not defined(sequtils):
       import std/sequtils
+    when not defined(setutils):
+      import std/setutils
 
     type
       enumName* {.pure.}  = enumFields
@@ -228,10 +230,27 @@ macro declareWorld*[T: tuple](
 
       w.freeIdxs.add(e.id)
 
-    macro queryImpl(w: var worldTy, ro, rw: static set[enumName]): untyped =
+    macro queryImpl(w: var worldTy, ro, rw: static openArray[enumName]): untyped =
       const cmpts = components
-      let mask = ro + rw
-      var tupleConstr = nnkTupleConstr.newTree(bindSym"Entity")
+      var
+        mask: set[enumName]
+        tupleConstr = nnkTupleConstr.newTree(bindSym"Entity")
+
+      for c in ro:
+        if c in mask:
+          error(
+            "Duplicate component `" & $c & "` in read-only set components",
+            callsite()
+          )
+        mask.incl(c)
+      
+      for c in rw:
+        if c in mask:
+          error(
+            "Duplicate component `" & $c & "` in read-only set components",
+            callsite()
+          )
+        mask.incl(c)
 
       for c in ro:
         let ttyp = cmpts.filterIt(it.kind.strVal == $c)[0].typ
@@ -243,7 +262,7 @@ macro declareWorld*[T: tuple](
         if ttyp.kind in {nnkIdent, nnkSym} and ttyp.strVal != "void":
           tupleConstr.add ttyp
       
-      macro makeTupleRet(w: var worldTy, ro, rw: static set[enumName], i: uint32): untyped =
+      macro makeTupleRet(w: var worldTy, ro, rw: static openArray[enumName], i: uint32): untyped =
         var
           entitySym = genSym("ent")
           entDecl = genAst(entitySym, i):
@@ -280,14 +299,16 @@ macro declareWorld*[T: tuple](
           quote do: yield `tupRetNode`
         )
 
-      result = genAst(w, ro, rw, mask):
+      let
+        rdo = @ro
+        rwa = @rw
+
+      result = genAst(w, rdo, rwa, mask):
         for entityIdx in 0'u32..<uint32(w.sigs.len):
           if w.sigs[entityIdx] * mask == mask:
-            makeTupleRet(w, ro, rw, entityIdx)
+            makeTupleRet(w, rdo, rwa, entityIdx)
 
     iterator query*(
       w: var worldTy,
-      readOnly, readWrite: static set[enumName] = {}
+      readOnly, readWrite: static openArray[enumName] = []
     ): auto = w.queryImpl(readOnly, readWrite)
-
-  echo repr(result)

@@ -1,7 +1,3 @@
-import std/[
-  importutils
-]
-
 import vitaente
 
 # 1. Define the World
@@ -9,7 +5,7 @@ import vitaente
 declareWorld("Game", tuple[pos: float, vel: float, isHero: void])
 
 proc main() =
-  echo "=== [Sovereign ECS: Test Suite] ==="
+  echo "=== [VitaEnte ECS: Test Suite] ==="
   
   var world = Game()
   var entities: seq[Entity]
@@ -50,14 +46,14 @@ proc main() =
   echo "\n[Test 3] Testing Query (pos)..."
   var posCount = 0
   # Note: The query yields (Entity, ComponentA, ComponentB...)
-  for e, p in world.query({gcPos}):
+  for e, p in world.query([gcPos]):
     assert p == e.id.float * 10.0
     posCount.inc
   assert posCount == 5
 
   echo "[Test 3b] Testing Join Query (pos + vel)..."
   var joinCount = 0
-  for e, p, v in world.query({gcPos, gcVel}):
+  for e, p, v in world.query([gcPos, gcVel]):
     # Should only find 0, 2, 4
     assert e.id in {0'u32, 2'u32, 4'u32}
     joinCount.inc
@@ -66,7 +62,7 @@ proc main() =
   echo "[Test 3c] Testing Tag Query (isHero)..."
   var heroCount = 0
   # Void components are skipped in the tuple yield, but filter the join!
-  for e in world.query({gcIsHero}):
+  for e in world.query([gcIsHero]):
     assert e.id == 0
     heroCount.inc
   assert heroCount == 1
