@@ -17,8 +17,8 @@ type
 
   # Public types
   Entity* = object
-    id: uint32
-    gen: uint32
+    id*: uint32
+    gen*: uint32
 
   SparseSet*[T] = object 
     smap: seq[uint32]   # Entity -> Dense
@@ -166,6 +166,15 @@ macro declareWorld*[T: tuple](
     {kDirtyTemplate}, enumName, enumFields, worldTy, worldObj, componentEnumMap,
     scem, components
   ):
+    when not declared(tables):
+      import std/tables
+    when not defined(macros):
+      import std/macros
+    when not defined(genasts):
+      import std/genasts
+    when not defined(sequtils):
+      import std/sequtils
+
     type
       enumName* {.pure.}  = enumFields
       worldTy* = worldObj
@@ -198,14 +207,14 @@ macro declareWorld*[T: tuple](
       ## Add a component to an entity, with a given value.
       w.sigs[e.id].incl(enm)
       for name, field in w.fieldPairs:
-        when scem[enm] == name:
+        when scem[$enm] == name:
           field.add(e, val)
 
     template add*(w: var worldTy, e: Entity, enm: static enumName) =
       ## Add a component to an entity, without a value.
       w.sigs[e.id].incl(enm)
       for name, field in w.fieldPairs:
-        when scem[enm] == name:
+        when scem[$enm] == name:
           field.add(e)
     
     proc kill*(w: var worldTy, e: Entity) =
@@ -220,68 +229,65 @@ macro declareWorld*[T: tuple](
       w.freeIdxs.add(e.id)
 
     macro queryImpl(w: var worldTy, ro, rw: static set[enumName]): untyped =
-      var tupleConstr = nnkTupleConstr.newTree(bindSym"Entity")
+      const cmpts = components
       let mask = ro + rw
+      var tupleConstr = nnkTupleConstr.newTree(bindSym"Entity")
 
       for c in ro:
-        let ttyp = components.filterIt(it.kind.strVal == $c)[0].typ
+        let ttyp = cmpts.filterIt(it.kind.strVal == $c)[0].typ
         if ttyp.kind in {nnkIdent, nnkSym} and ttyp.strVal != "void":
           tupleConstr.add ttyp
       
       for c in rw:
-        let ttyp = components.filterIt(it.kind.strVal == $c)[0].typ
+        let ttyp = cmpts.filterIt(it.kind.strVal == $c)[0].typ
         if ttyp.kind in {nnkIdent, nnkSym} and ttyp.strVal != "void":
           tupleConstr.add ttyp
       
-      template makeTupleRet(ro, rw: static set[enumName], i: untyped): untyped =
-        var res = newNimNode(nnkTupleConstr).add(
-          genAst(Entity(id: i, gen: w.generations[i]))
-        )
+      macro makeTupleRet(w: var worldTy, ro, rw: static set[enumName], i: uint32): untyped =
+        var
+          entitySym = genSym("ent")
+          entDecl = genAst(entitySym, i):
+            let entitySym = Entity(id: i, gen: w.generations[i])
+          tupRetNode = newNimNode(nnkTupleConstr).add(entitySym)
 
         for c in ro:
-          let componentInfo = components.filterIt(it.kind.strVal == $c)[0]
+          let componentInfo = cmpts.filterIt(it.kind.strVal == $c)[0]
           if (componentInfo.typ.kind in {nnkIdent, nnkSym} and
             componentInfo.typ.strVal != "void"):
-            res.add newNimNode(nnkDotExpr).add(
-              newLit(w),
-              newNimNode(nnkBracketExpr).add(
-                componentInfo.name,
-                newLit(i)
-              )
+            let componentAccess = newNimNode(nnkDotExpr).add(
+              w,
+              ident(componentInfo.name.strVal)
             )
+            tupRetNode.add quote do:
+              `componentAccess`[`entitySym`]
         
         for c in rw:
-          let componentInfo = components.filterIt(it.kind.strVal == $c)[0]
+          let componentInfo = cmpts.filterIt(it.kind.strVal == $c)[0]
           if (componentInfo.typ.kind in {nnkIdent, nnkSym} and
             componentInfo.typ.strVal != "void"):
-            res.add newNimNode(nnkDotExpr).add(
-              newLit(w),
-              newNimNode(nnkBracketExpr).add(
-                componentInfo.name,
-                newLit(i)
-              )
+            let componentAccess = newNimNode(nnkDotExpr).add(
+              w,
+              ident(componentInfo.name.strVal)
             )
+            tupRetNode.add quote do:
+              `componentAccess`[`entitySym`]
 
-        res
+        if tupRetNode.len == 1:
+          tupRetNode = tupRetNode[0]
 
-      result = genAst(ro, rw):
+        newNimNode(nnkStmtList).add(
+          entDecl,
+          quote do: yield `tupRetNode`
+        )
+
+      result = genAst(w, ro, rw, mask):
         for entityIdx in 0'u32..<uint32(w.sigs.len):
           if w.sigs[entityIdx] * mask == mask:
-            makeTupleRet(ro, rw, entityIdx)
+            makeTupleRet(w, ro, rw, entityIdx)
 
     iterator query*(
       w: var worldTy,
       readOnly, readWrite: static set[enumName] = {}
     ): auto = w.queryImpl(readOnly, readWrite)
 
-
-  echo treeRepr(result)
   echo repr(result)
-
-
-declareWorld("Test", tuple[velocity, position: float])
-
-var a = Test()
-
-for e, v in a.query({tcVelocity}):
-  discard
