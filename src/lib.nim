@@ -98,21 +98,6 @@ template `[]=`*[T](ss: var SparseSet[T], e: Entity, val: T) =
 # Helpers
 proc grabUppercase(s: string): string = s.filter(isUpperAscii).join()
 
-macro yieldIteratorImpl(typ: typed, call: untyped): untyped =
-  let arg = ident"arg"
-  result = nnkForStmt.newTree(arg)
-  let yieldedTup = nnkTupleConstr.newTree()
-
-  for i, _ in typ.getTypeInst[^1]:
-    yieldedTup.add nnkBracketExpr.newTree(arg, newLit i)
-
-  result.add call
-  result.add nnkYieldStmt.newTree(yieldedTup)
-
-
-template yieldIterator(call: untyped): untyped =
-  yieldIteratorImpl(typeof(call), call)
-
 proc newLit(n: NimNode): NimNode =
   newCall(bindSym"quote", newStmtList(n))
 
@@ -234,47 +219,60 @@ macro declareWorld*[T: tuple](
 
       w.freeIdxs.add(e.id)
 
-    macro tupRet(ro, rw: static set[enumName]): typedesc =
+    macro queryImpl(w: var worldTy, ro, rw: static set[enumName]): untyped =
       var tupleConstr = nnkTupleConstr.newTree(bindSym"Entity")
+      let mask = ro + rw
 
       for c in ro:
-        echo c
-        echo components.mapIt((it.name.treeRepr, it.kind.treeRepr)).join(", ")
-        tupleConstr.add (
-          components.filterIt(it.kind.strVal == $c)[0].typ
-        )
+        let ttyp = components.filterIt(it.kind.strVal == $c)[0].typ
+        if ttyp.kind in {nnkIdent, nnkSym} and ttyp.strVal != "void":
+          tupleConstr.add ttyp
       
       for c in rw:
-        tupleConstr.add newNimNode(nnKVarTy).add(
-          (components.filterIt(it.kind.strVal == $c)[0].typ)
+        let ttyp = components.filterIt(it.kind.strVal == $c)[0].typ
+        if ttyp.kind in {nnkIdent, nnkSym} and ttyp.strVal != "void":
+          tupleConstr.add ttyp
+      
+      template makeTupleRet(ro, rw: static set[enumName], i: untyped): untyped =
+        var res = newNimNode(nnkTupleConstr).add(
+          genAst(Entity(id: i, gen: w.generations[i]))
         )
 
-      result = tupleConstr
+        for c in ro:
+          let componentInfo = components.filterIt(it.kind.strVal == $c)[0]
+          if (componentInfo.typ.kind in {nnkIdent, nnkSym} and
+            componentInfo.typ.strVal != "void"):
+            res.add newNimNode(nnkDotExpr).add(
+              newLit(w),
+              newNimNode(nnkBracketExpr).add(
+                componentInfo.name,
+                newLit(i)
+              )
+            )
+        
+        for c in rw:
+          let componentInfo = components.filterIt(it.kind.strVal == $c)[0]
+          if (componentInfo.typ.kind in {nnkIdent, nnkSym} and
+            componentInfo.typ.strVal != "void"):
+            res.add newNimNode(nnkDotExpr).add(
+              newLit(w),
+              newNimNode(nnkBracketExpr).add(
+                componentInfo.name,
+                newLit(i)
+              )
+            )
 
-    macro query*(
+        res
+
+      result = genAst(ro, rw):
+        for entityIdx in 0'u32..<uint32(w.sigs.len):
+          if w.sigs[entityIdx] * mask == mask:
+            makeTupleRet(ro, rw, entityIdx)
+
+    iterator query*(
       w: var worldTy,
       readOnly, readWrite: static set[enumName] = {}
-    ): untyped =
-      ## Query the world for entities with the given components and act on them.
-      var tupleConstr = nnkTupleConstr.newTree(bindSym"Entity")
-
-      for c in readOnly:
-        echo c
-        echo components.mapIt((it.name.treeRepr, it.kind.treeRepr)).join(", ")
-        tupleConstr.add (
-          components.filterIt(it.kind.strVal == $c)[0].typ
-        )
-      
-      for c in readWrite:
-        tupleConstr.add newNimNode(nnKVarTy).add(
-          (components.filterIt(it.kind.strVal == $c)[0].typ)
-        )
-
-      result = genAst(tupleConstr):
-        iterator innerQuery(): tupleConstr =
-          yield default(tupleConstr)
-        
-        innerQuery
+    ): auto = w.queryImpl(readOnly, readWrite)
 
 
   echo treeRepr(result)
@@ -285,5 +283,5 @@ declareWorld("Test", tuple[velocity, position: float])
 
 var a = Test()
 
-for e, v in a.query({tcVelocity})():
+for e, v in a.query({tcVelocity}):
   discard
