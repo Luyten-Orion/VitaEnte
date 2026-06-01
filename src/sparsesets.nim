@@ -56,7 +56,7 @@ proc add*[T](ss: var SparseSet[T], e: Entity) =
   sparseAddImpl(ss, e)
 
 proc del*[T](ss: var SparseSet[T], e: Entity) =
-  ## Remove the component via swap-and-pop to maintain a packed dense array.
+  ## Swap-and-pop entity deletion.
   if e notin ss: return
 
   let 
@@ -64,16 +64,13 @@ proc del*[T](ss: var SparseSet[T], e: Entity) =
     idxToRemove = ss.smap[e.id]
     lastEntity = ss.dmap[^1]
 
-  # Move the last entity's metadata to the hole we just created
   ss.dmap[idxToRemove] = lastEntity
   ss.smap[lastEntity.id] = idxToRemove
   
   when T isnot void or T.distinctBase isnot void:
-    # Move the last component data to the hole
     ss.components[idxToRemove] = ss.components[^1]
     ss.components.setLen(ss.components.len - 1)
 
-  # Shrink the dense map and reset the sparse entry
   ss.dmap.setLen(ss.dmap.len - 1)
   ss.smap[e.id] = Sentinel
 
