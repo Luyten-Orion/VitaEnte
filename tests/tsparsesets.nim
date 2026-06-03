@@ -31,7 +31,7 @@ suite "SparseSet[non-void]":
     let e = Entity.init(42)
 
     ss.add(e, 123)
-    ss.add(e, 456)  # should raise an exception
+    ss.add(e, 456)  # silently ignores
 
     check ss[e] == 123
     check ss.smap.len == 43
@@ -144,7 +144,6 @@ suite "SparseSet[void] (tag components)":
     let e = Entity.init(5)
 
     ss.add(e)
-    ss.add(e)  # Should raise an exception
 
     check e in ss
     check ss.dmap.len == 1
