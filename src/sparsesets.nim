@@ -18,7 +18,7 @@ type
     when T isnot void or T.distinctBase isnot void:
       components: seq[T] # Data
 
-const Sentinel = int(uint32.high)
+const Sentinel* = int(uint32.high)
 
 proc contains*[T](ss: SparseSet[T], e: Entity): bool {.inline.} =
   ## Check if the entity is in the SparseSet
@@ -61,8 +61,9 @@ proc del*[T](ss: var SparseSet[T], e: Entity) =
   ## Swap-and-pop entity deletion.
   if e notin ss: return
 
-  let 
-    # TODO: Raise an IndexDefect
+  if e.id notin ss.smap: return
+
+  let
     idxToRemove = ss.smap[e.id]
     lastEntity = ss.dmap[^1]
 
