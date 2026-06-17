@@ -25,18 +25,42 @@ proc sparseSetFieldName(field: NimNode): string =
   name[0] = toLowerAscii(name[0])
   name & "Components"
 
-macro genSparseSetField(components: typedesc[tuple]): untyped {.used.} =
-  var componentsNode = components.getTypeImpl
-  componentsNode.expectKind(nnkBracketExpr)
-  if componentsNode[1].kind != nnkTupleConstr:
-    error("`genSparseSetField` only works for unnamed tuples.")
-  for component in componentsNode[1]:
+proc getTupleConstrNode(node: NimNode): tuple[node: NimNode, success: bool] =
+  result = (node, false)
+
+  while result.node.kind != nnkTupleConstr:
+    if result.node.kind == nnkBracketExpr:
+      result.node = result.node[1].getTypeImpl
+      continue
+    elif result.node.kind == nnkSym:
+      result.node = result.node.getImpl
+      continue
+    elif result.node.kind == nnkTypeDef:
+      result.node = result.node[2]
+      continue
+    else:
+      return
+
+  result.success = true
+
+proc typToTup(n: NimNode): NimNode =
+  result = newNimNode(nnkTupleConstr)
+  for i in n.getType[1..^1]:
+    result.add i
+
+macro genSparseSetField(components: typedesc[tuple]): typedesc {.used.} =
+  var (componentsNode, success) = getTupleConstrNode(components.getTypeInst)
+
+  if not success:
+    error("Expected a tuple of components, such as `(Position, Velocity)`.")
+
+  for component in componentsNode:
     if component.kind != nnkSym:
       error("`genSparseSetField` doesn't work with generics for now.")
 
   result = newNimNode(nnkTupleTy)
 
-  for component in componentsNode[1]:
+  for component in componentsNode:
     # TODO: Support generic types in the future
     result.add(newIdentDefs(
       ident(sparseSetFieldName(component)),
@@ -44,7 +68,7 @@ macro genSparseSetField(components: typedesc[tuple]): untyped {.used.} =
         bindSym"SparseSet",
         component
       )
-    ))    
+    ))
 
 
 type
@@ -62,13 +86,13 @@ type
   Command*[T: tuple] = proc (w: var World[T]) {.closure.}
   CommandBuffer*[T: tuple] = seq[Command[T]]
 
-macro accessSparseSet*[T: tuple, U](w: World[T], _: typedesc[U]): SparseSet[U] =
+macro accessSparseSet*(w: World[tuple], U: typedesc): SparseSet[U] =
   block checkComponentExists:
-    for typ in T.getTypeInst:
+    for typ in typToTup(w):
       if U.getTypeInst == typ:
         break checkComponentExists
     
-    error("There is no `" & `U`.getTypeInst.repr & "` component in `" & `T`.getTypeInst.repr & "`", callsite())
+    error("There is no `" & `U`.getTypeInst.repr & "` component in `" & `w`.getTypeInst.repr & "`", callsite())
 
   let sparseSet = sparseSetFieldName(U.getTypeInst)
 
@@ -81,10 +105,10 @@ macro accessSparseSet*[T: tuple, U](w: World[T], _: typedesc[U]): SparseSet[U] =
   )
 
 template addComponent[T: tuple, U](w: World[T], e: Entity, component: U) =
-  accessSparseSet(w, U).add(e, component)
+  accessSparseSet(w, typedesc[U]).add(e, component)
 
 template addComponent[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]) =
-  accessSparseSet(w, U).add(e)
+  accessSparseSet(w, typedesc[U]).add(e)
 
 template delComponent[T: tuple, U](w: World[T], e: Entity) =
   accessSparseSet(w, U).del(e)
@@ -95,21 +119,23 @@ template hasComponent[T: tuple, U](w: World[T], e: Entity): bool =
 template getComponent[T: tuple, U](w: World[T], e: Entity): U =
   accessSparseSet(w, U)[e]
 
-macro addComponents*[T: tuple, U](
-  cb: CommandBuffer[T],
+macro addComponents*(
+  cb: CommandBuffer[tuple],
   e: Entity,
   components: varargs[untyped]
 ): untyped =
+  var T = typToTup(cb)
   result = genAst:
     cb.add (proc(w: var World[T]) =
       for component in components:
         w.addComponent(e, component))
 
-macro delComponents*[T: tuple, U](
-  cb: CommandBuffer[T],
+macro delComponents*(
+  cb: CommandBuffer[tuple],
   e: Entity,
   components: varargs[untyped]
 ): untyped =
+  var T = typToTup(cb)
   result = genAst:
     cb.add (proc(w: var World[T]) =
       for component in components:
@@ -126,7 +152,7 @@ proc apply*[T: tuple](w: var World[T], cb: CommandBuffer[T]) =
 
 proc spawn*(w: var World, count: Natural = 1): seq[Entity] =
   # TODO: Make this check happen in release builds?
-  if w.lock: raise newException(ConcurrentWorldAccessDefect)
+  if w.lock: raise newException(ConcurrentWorldAccessDefect, "Trying to spawn while world is locked.")
   w.lock = true
   when sizeof(int) == 8:
     assert w.entities.len + count <= high(uint32).int
@@ -140,7 +166,7 @@ proc spawn*(w: var World, count: Natural = 1): seq[Entity] =
   w.lock = false
 
 proc despawn*(w: var World, entities: seq[Entity]) =
-  if w.lock: raise newException(ConcurrentWorldAccessDefect)
+  if w.lock: raise newException(ConcurrentWorldAccessDefect, "Trying to despawn while world is locked.")
   w.lock = true
   for e in entities:
     # TODO: Find a better way to mass-delete entities, perhaps find all the indices and delete in reverse?
@@ -150,17 +176,20 @@ proc despawn*(w: var World, entities: seq[Entity]) =
     
   w.lock = false
 
-macro makeSystemFnType*[T: tuple, U: distinct tuple](
-  a: typedesc[T], b: typedesc[U]
-): typedesc =
+macro makeSystemFnType*(
+  a: NimNode, b: NimNode
+): typedesc[proc] =
   result = newNimNode(nnkProcTy).add(
     newNimNode(nnkFormalParams).add(
-      CommandBuffer[T].getTypeInst()
+      newNimNode(nnkBracketExpr).add(
+        bindSym"CommandBuffer",
+        a
+      )
     )
   )
 
   var i = 0
-  for typ in U.getTypeInst:
+  for typ in b:
     if typ.kind == nnkBracketExpr and typ[0] == Not.getTypeInst():
       continue
     inc i
@@ -172,10 +201,10 @@ macro makeSystemFnType*[T: tuple, U: distinct tuple](
       )
     )
 
-macro smallestSetOfEntities[T: tuple, U: distinct tuple](w: var World[T], _: typedesc[U]): seq[Entity] =
+macro smallestSetOfEntities(w: var World[tuple], U: NimNode): seq[Entity] =
   var c = 0
 
-  for typ in U.getTypeInst:
+  for typ in typToTup(U):
     if typ.kind == nnkBracketExpr and typ[0] == Not.getTypeInst():
       continue
     inc c
@@ -186,12 +215,18 @@ macro smallestSetOfEntities[T: tuple, U: distinct tuple](w: var World[T], _: typ
 
   let smallestSetSym = genSym("smallestSet")
 
-  var result = newNimNode(nnkStmtList).add(
-    newVarStmt(smallestSetSym, newLit(nil))
+  result = newNimNode(nnkStmtList).add(
+    newNimNode(nnkVarSection).add(
+      newIdentDefs(
+        smallestSetSym,
+        (quote do: ptr seq[Entity]),
+        newNilLit()
+      )
+    ),
     newNimNode(nnkIfStmt)
   )
 
-  for typ in U.getTypeInst:
+  for typ in typToTup(U):
     if typ.kind == nnkBracketExpr and typ[0] == Not.getTypeInst():
       continue
       
@@ -204,7 +239,26 @@ macro smallestSetOfEntities[T: tuple, U: distinct tuple](w: var World[T], _: typ
 
     result[^1].add(r)
 
-  result.add genAst: smallestSetSym[]
+  result.add newNimNode(nnkIfStmt).add(
+    newNimNode(nnkElifBranch).add(
+      newNimNode(nnkInfix).add(
+        ident"==",
+        smallestSetSym,
+        newNilLit()
+      ),
+      newStmtList(
+        newNimNode(nnkVarSection).add(
+          newIdentDefs(
+            smallestSetSym,
+            (quote do: seq[Entity]),
+            prefix(newNimNode(nnkBracket), "@")
+          )
+        )
+      )
+    )
+  )
+
+  result.add newNimNode(nnkDerefExpr).add(smallestSetSym)
     
 
 
@@ -220,35 +274,47 @@ proc isVoid(T: NimNode): bool =
   return Ti[2][0].isVoid
 
 
-macro callSystemFn[T: tuple, U: distinct tuple](
-  w: var World[T],
+macro callSystemFn(
+  w: var World[tuple],
   e: Entity,
-  components: varargs[typedesc],
-  f: makeSystemFnType(T, U)
-): CommandBuffer[T] =
+  components: typedesc[tuple],
+  f: proc
+): CommandBuffer[tuple] =
   var
     excl: seq[NimNode]
     incl: seq[NimNode]
     condStmts: seq[NimNode]
-    cmpts: seq[NimNode]
     cond: NimNode
 
-  for typ in U.getTypeInst:
+  for typ in typToTup(components):
     if typ.kind == nnkBracketExpr and typ[0] == Not.getTypeInst():
       excl.add(typ[1])
     else:
       incl.add(typ)
 
   for i in excl:
-    condStmts.add genAst(typ=i): not w.hasComponent(e, typ)
+    condStmts.add prefix(
+      newCall(
+        bindSym"hasComponent",
+        w,
+        e,
+        i
+      ),
+      "not"
+    )
   
   for i in incl:
-    condStmts.add genAst(typ=i): w.hasComponent(e, typ)
+    condStmts.add newCall(
+      bindSym"hasComponent",
+      w,
+      e,
+      i
+    )
 
   if condStmts.len > 0:
     cond = condStmts[0]
     for i in 1..condStmts.high:
-      cond = infix("and", cond, condStmts[i])
+      cond = infix(cond, "and", condStmts[i])
   else:
     cond = newLit(true)
 
@@ -264,32 +330,98 @@ macro callSystemFn[T: tuple, U: distinct tuple](
     for i in incl:
       if i.isVoid():
         continue
-      fCall.add genAst(typ=i): w.getComponent(e, typ)
+      fCall.add newCall(
+        bindSym"hasComponent",
+        w,
+        e,
+        i
+      )
 
   result = genAst:
     if cond:
       fCall
 
-macro runSystem*[T: tuple, U: distinct tuple](
-  w: var World[T],
-  components: tuple[U],
-  orderedIteration: bool
-  f: makeSystemFnType(T, U)
+macro runSystem*(
+  w: var World[tuple],
+  components: typedesc[tuple],
+  orderedIteration: bool,
+  f: proc
 ) =
+  var
+    worldTuple = typToTup(w)
+    componentsTuple = typToTup(components)
+
+    fnTyp = makeSystemFnType(worldTuple, componentsTuple)
+    smallestSet = smallestSetOfEntities(w, componentsTuple)
+
   result = genAst:
+    when f isnot fnTyp:
+      {.error: "`f` is not a valid system function for the given set of components!".}
     var
-      entities = smallestSetOfEntities(w, U)
-      cmdBuf: CommandBuffer[T]
+      entities = smallestSet
+      cmdBuf: CommandBuffer[worldTuple]
     if orderedIteration:
       entities.sort()
     for e in entities:
-      cmdBuf &= callSystemFn(w, e, components, f)
+      cmdBuf &= callSystemFn(w, e, componentsTuple, f)
     
     w.apply(cmdBuf)
 
-template runSystem*[T: tuple, U: distinct tuple](
-  w: var World[T],
-  components: tuple[U],
-  f: makeSystemFnType(T, U)
+template runSystem*(
+  w: var World[tuple],
+  components: typedesc[tuple],
+  f: proc
 ) = runSystem(w, components, false, f)
 
+type
+  Position = object
+    x, y: int
+
+  Velocity = object
+    dx, dy: int
+
+  # Optional: a tag component (no data)
+  # In Nim, use `void` for tags
+  IsAlive = void
+
+# 2. Declare the tuple of all components your world can contain
+# Order doesn't matter, but must list every component type you'll use.
+type MyComponents = (Position, Velocity, IsAlive)
+
+# 3. Create the world
+var world = World[MyComponents]()
+
+# 4. Spawn some entities
+let e1 = world.spawn()[0]
+let e2 = world.spawn()[0]
+let e3 = world.spawn()[0]
+
+# 5. Add components (data and tags)
+world.addComponent(e1, Position(x: 0, y: 0))
+world.addComponent(e1, Velocity(dx: 1, dy: 2))
+world.addComponent(e1, IsAlive)  # tag, no value
+
+world.addComponent(e2, Position(x: 10, y: 10))
+world.addComponent(e2, Velocity(dx: -1, dy: 0))
+
+world.addComponent(e3, Position(x: 5, y: 5))
+# e3 has no Velocity or IsAlive
+
+# 6. Define a system (using `runSystem` with a proc)
+# The proc signature: (world, entity, var comp1, var comp2, ...) -> CommandBuffer[MyComponents]
+# The system will run for every entity that has **all** the listed components.
+# Here we iterate over entities with both Position and Velocity.
+world.runSystem((Position, Velocity),
+  proc(w: var World[MyComponents], e: Entity, pos: var Position, vel: var Velocity): CommandBuffer[MyComponents] =
+    # Update position
+    pos.x += vel.dx
+    pos.y += vel.dy
+)
+
+# 7. After running, check results
+for e in [e1, e2, e3]:
+  if world.hasComponent(e, Position):
+    let pos = world.getComponent(e, Position)
+    echo "Entity ", e.id, " at (", pos.x, ", ", pos.y, ")"
+  else:
+    echo "Entity ", e.id, " has no Position"
