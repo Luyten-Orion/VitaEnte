@@ -11,4 +11,5 @@ template init*(T: typedesc[Entity], eId: T.id): T = T(id: eId)
 # Read only field
 template id*(e: Entity): Entity.id = e.id
 
+proc `<`*(a, b: Entity): bool {.inline.} = a.id < b.id
 proc cmp*(a, b: Entity): int {.inline.} = cmp(a.id, b.id)
