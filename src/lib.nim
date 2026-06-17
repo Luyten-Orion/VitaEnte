@@ -50,8 +50,8 @@ proc typToTup(n: NimNode): NimNode =
   for i in n.getType[1].getType[1..^1]:
     result.add i
 
-macro genSparseSetField(components: typedesc[tuple]): typedesc {.used.} =
-  var (componentsNode, success) = getTupleConstrNode(components.getTypeInst)
+macro genSparseSetField(components: typedesc[tuple]): untyped {.used.} =
+  var (componentsNode, success) = getTupleConstrNode(components.getTypeImpl)
 
   if not success:
     error("Expected a tuple of components, such as `(Position, Velocity)`.")
@@ -83,6 +83,7 @@ type
     lock*: bool
 
   Not*[T] = distinct T
+  Mut*[T] = distinct T
 
   # TODO: Make a more efficient command buffer
   Command*[T: tuple] = proc (w: var World[T]) {.closure.}
@@ -186,11 +187,23 @@ proc makeSystemFnType*(
       newNimNode(nnkBracketExpr).add(
         bindSym"CommandBuffer",
         a
+      ),
+      newIdentDefs(
+        ident("e"),
+        bindSym"Entity"
       )
-    )
+    ),
+    newEmptyNode()
   )
 
   var i = 0
+
+  template getTyp(typ: NimNode): NimNode =
+    if typ.kind == nnkBracketExpr and typ[0] == bindSym"Mut":
+      newNimNode(nnkVarTy).add(typ[1])
+    else:
+      typ
+
   for typ in b:
     if typ.kind == nnkBracketExpr and typ[0] == bindSym"Not":
       continue
@@ -199,7 +212,7 @@ proc makeSystemFnType*(
     result[0].add(
       newIdentDefs(
         ident("a" & $i),
-        typ
+        getTyp(typ)
       )
     )
 
@@ -357,8 +370,8 @@ macro runSystem*(
     smallestSet = smallestSetOfEntities(w, componentsTuple)
 
   result = genAst(f, fnTyp):
-    when f isnot fnTyp:
-      {.error: "`f` is not a valid system function for the given set of components!".}
+    when not compiles(fnTyp(f)):
+      {.error: "`f` `" & $typeof(f) & "` is not of type: `" & $fnTyp & "`".}
     var
       entities = smallestSet
       cmdBuf: CommandBuffer[worldTuple]
@@ -413,8 +426,8 @@ world.addComponent(e3, Position(x: 5, y: 5))
 # The proc signature: (world, entity, var comp1, var comp2, ...) -> CommandBuffer[MyComponents]
 # The system will run for every entity that has **all** the listed components.
 # Here we iterate over entities with both Position and Velocity.
-world.runSystem((Position, Velocity),
-  proc(w: var World[MyComponents], e: Entity, pos: var Position, vel: var Velocity): CommandBuffer[MyComponents] =
+world.runSystem((Mut[Position], Mut[Velocity]),
+  proc(e: Entity, pos: var Position, vel: var Velocity): CommandBuffer[MyComponents] =
     # Update position
     pos.x += vel.dx
     pos.y += vel.dy
