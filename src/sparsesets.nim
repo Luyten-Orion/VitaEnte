@@ -52,7 +52,7 @@ proc add*[T](ss: var SparseSet[T], e: Entity, val: T) =
 
 proc add*[T](ss: var SparseSet[T], e: Entity) =
   ## Add a 'tag' component (no data) to an entity.
-  when T isnot void or T.distinctBase isnot void:
+  when not (T is void or T.distinctBase is void):
     {.error: "Can't accept a value when no value is required.".}
   sparseAddImpl(ss, e):
     discard

@@ -44,8 +44,10 @@ proc getTupleConstrNode(node: NimNode): tuple[node: NimNode, success: bool] =
   result.success = true
 
 proc typToTup(n: NimNode): NimNode =
+  if n.kind == nnkTupleConstr:
+    return n
   result = newNimNode(nnkTupleConstr)
-  for i in n.getType[1..^1]:
+  for i in n.getType[1].getType[1..^1]:
     result.add i
 
 macro genSparseSetField(components: typedesc[tuple]): typedesc {.used.} =
@@ -89,12 +91,12 @@ type
 macro accessSparseSet*(w: World[tuple], U: typedesc): SparseSet[U] =
   block checkComponentExists:
     for typ in typToTup(w):
-      if U.getTypeInst == typ:
+      if U.getType[1] == typ:
         break checkComponentExists
     
-    error("There is no `" & `U`.getTypeInst.repr & "` component in `" & `w`.getTypeInst.repr & "`", callsite())
+    error("There is no `" & `U`.getType[1].repr & "` component in `" & `w`.getTypeInst.repr & "`", callsite())
 
-  let sparseSet = sparseSetFieldName(U.getTypeInst)
+  let sparseSet = sparseSetFieldName(U.getType[1])
 
   result = newNimNode(nnkDotExpr).add(
     newNimNode(nnkDotExpr).add(
@@ -176,9 +178,9 @@ proc despawn*(w: var World, entities: seq[Entity]) =
     
   w.lock = false
 
-macro makeSystemFnType*(
+proc makeSystemFnType*(
   a: NimNode, b: NimNode
-): typedesc[proc] =
+): NimNode =
   result = newNimNode(nnkProcTy).add(
     newNimNode(nnkFormalParams).add(
       newNimNode(nnkBracketExpr).add(
@@ -190,7 +192,7 @@ macro makeSystemFnType*(
 
   var i = 0
   for typ in b:
-    if typ.kind == nnkBracketExpr and typ[0] == Not.getTypeInst():
+    if typ.kind == nnkBracketExpr and typ[0] == bindSym"Not":
       continue
     inc i
 
@@ -201,11 +203,11 @@ macro makeSystemFnType*(
       )
     )
 
-macro smallestSetOfEntities(w: var World[tuple], U: NimNode): seq[Entity] =
+proc smallestSetOfEntities(w: NimNode, U: NimNode): NimNode =
   var c = 0
 
   for typ in typToTup(U):
-    if typ.kind == nnkBracketExpr and typ[0] == Not.getTypeInst():
+    if typ.kind == nnkBracketExpr and typ[0] == bindSym"Not":
       continue
     inc c
 
@@ -227,7 +229,7 @@ macro smallestSetOfEntities(w: var World[tuple], U: NimNode): seq[Entity] =
   )
 
   for typ in typToTup(U):
-    if typ.kind == nnkBracketExpr and typ[0] == Not.getTypeInst():
+    if typ.kind == nnkBracketExpr and typ[0] == bindSym"Not":
       continue
       
     var r = genAst:
@@ -287,7 +289,7 @@ macro callSystemFn(
     cond: NimNode
 
   for typ in typToTup(components):
-    if typ.kind == nnkBracketExpr and typ[0] == Not.getTypeInst():
+    if typ.kind == nnkBracketExpr and typ[0] == bindSym"Not":
       excl.add(typ[1])
     else:
       incl.add(typ)
@@ -354,7 +356,7 @@ macro runSystem*(
     fnTyp = makeSystemFnType(worldTuple, componentsTuple)
     smallestSet = smallestSetOfEntities(w, componentsTuple)
 
-  result = genAst:
+  result = genAst(f, fnTyp):
     when f isnot fnTyp:
       {.error: "`f` is not a valid system function for the given set of components!".}
     var
@@ -382,7 +384,7 @@ type
 
   # Optional: a tag component (no data)
   # In Nim, use `void` for tags
-  IsAlive = void
+  IsAlive = distinct void
 
 # 2. Declare the tuple of all components your world can contain
 # Order doesn't matter, but must list every component type you'll use.
