@@ -1,6 +1,7 @@
 ## A minimal sparse ECS implementation for Nimskull
 
 import std/[
+  importutils,
   typetraits,
   algorithm,
   sequtils,
@@ -92,25 +93,32 @@ type
   Command*[T: tuple] = proc (w: var World[T]) {.closure.}
   CommandBuffer*[T: tuple] = seq[Command[T]]
 
+#[
 proc accessSparseSetImpl*(w: NimNode, U: NimNode): NimNode =
   template getTyp(typ: NimNode): NimNode =
-    if typ.kind == nnkBracketExpr and typ[0] == bindSym"Mut":
-      typ[1]
+    if typ.kind == nnkBracketExpr:
+      if typ[0] == bindSym"Mut":
+        typ[1]
+      elif typ[0].repr.eqIdent("typedesc"):
+        typ[1]
+      else:
+        typ
     else:
+      echo typ.treeRepr
       typ
 
   block checkComponentExists:
     for typ in typToTup(w):
-      if U.kind == nnkIdent:
+      if getTyp(U).kind == nnkIdent:
         if typ.repr.eqIdent(U.repr):
           break checkComponentExists
       else:
-        if U == typ:
+        if getTyp(U) == typ:
           break checkComponentExists
     
-    error("There is no `" & `U`.repr & "` component in `" & `w`.getTypeInst.repr & "`", callsite())
+    error("There is no `" & getTyp(`U`).repr & "` component in `" & `w`.getTypeInst.repr & "`", callsite())
 
-  let sparseSet = sparseSetFieldName(U)
+  let sparseSet = sparseSetFieldName(getTyp(U))
 
   result = newNimNode(nnkDotExpr).add(
     newNimNode(nnkDotExpr).add(
@@ -122,24 +130,45 @@ proc accessSparseSetImpl*(w: NimNode, U: NimNode): NimNode =
 
 macro accessSparseSet*(w: typed, U: typedesc): SparseSet[U] =
   accessSparseSetImpl(w, U.getTypeInst)
+]#
+
+proc accessSparseSet*[T: tuple, U](w: var World[T], _: typedesc[U]): var SparseSet[U] =
+  for _, sparseSet in w.sparseSets.fieldPairs:
+    when sparseSet is SparseSet[U]:
+      return sparseSet
+
+  error("There is no `" & $U & "` component in `" & $T & "`", callsite())
+
+proc accessSparseSet*[T: tuple, U](w: World[T], _: typedesc[U]): SparseSet[U] =
+  for _, sparseSet in w.sparseSets.fieldPairs:
+    when sparseSet is SparseSet[U]:
+      return sparseSet
+
+  error("There is no `" & $U & "` component in `" & $T & "`", callsite())
+
 
 template addComponent[T: tuple, U](w: World[T], e: Entity, component: U) =
-  accessSparseSet(w, U).add(e, component)
+  accessSparseSet(w, typeof(U)).add(e, component)
 
 template addComponent[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]) =
-  accessSparseSet(w, U).add(e)
+  accessSparseSet(w, typeof(U)).add(e)
 
 template delComponent[T: tuple, U](w: World[T], e: Entity) =
-  accessSparseSet(w, U).del(e)
+  accessSparseSet(w, typeof(U)).del(e)
 
-template hasComponent[T: tuple, U: not Mut](w: World[T], e: Entity, _: typedesc[U]): bool =
-  e in accessSparseSet(w, U)
+template hasComponent[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): bool =
+  when T is Mut:
+    e in accessSparseSet(w, typeof(U.distinctBase))
+  elif T is Not:
+    not (e in accessSparseSet(w, typeof(U.distinctBase)))
+  else:
+    e in accessSparseSet(w, typeof(U))
 
-template hasComponent[T: tuple, U: Mut](w: World[T], e: Entity, _: typedesc[U]): bool =
-  e in accessSparseSet(w, U.distinctBase)
+template hasComponent[T: tuple, U](w: World[T], e: Entity, _: U): bool =
+  hasComponent(w, e, typeof(U))
 
 template getComponent[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): U =
-  accessSparseSet(w, U)[e]
+  accessSparseSet(w, typeof(U))[e]
 
 macro addComponents*[T: tuple](
   cb: CommandBuffer[T],
@@ -234,77 +263,23 @@ proc makeSystemFnType*(
       )
     )
 
-proc smallestSetOfEntities(w: NimNode, U: NimNode): NimNode =
-  var c = 0
+macro unrollRange(rn: static HSlice[int, int], body: untyped) =
+  result = newNimNode(nnkStmtList)
 
-  for typ in typToTup(U):
-    if typ.kind == nnkBracketExpr and typ[0] == bindSym"Not":
-      continue
-    inc c
-
-  if c < 1:
-    error("System requires at least one iterable component.")
-    return
-
-  let smallestSetSym = genSym("smallestSet")
-
-  result = newNimNode(nnkStmtList).add(
-    newNimNode(nnkVarSection).add(
-      newIdentDefs(
-        smallestSetSym,
-        (quote do: ptr seq[Entity]),
-        newNilLit()
-      )
-    ),
-    newNimNode(nnkIfStmt)
-  )
-
-  template getTyp(typ: NimNode): NimNode =
-    if typ.kind == nnkBracketExpr and typ[0] == bindSym"Mut":
-      typ[1]
-    else:
-      typ
-
-  for typ in typToTup(U):
-    if typ.kind == nnkBracketExpr and typ[0] == bindSym"Not":
-      continue
-
-    var
-      t = getTyp(typ)
-      sparseSet = accessSparseSetImpl(w, t)
-
-    var r = genAst(smallestSetSym, sparseSet):
-      if smallestSetSym == nil or smallestSetSym[].len > sparseSet.len:
-        smallestSetSym = addr sparseSet.dmap
-    
-    while r.kind != nnkElifBranch:
-      r = r[0]
-
-    result[^1].add(r)
-
-  result.add newNimNode(nnkIfStmt).add(
-    newNimNode(nnkElifBranch).add(
-      newNimNode(nnkInfix).add(
-        ident"==",
-        smallestSetSym,
-        newNilLit()
-      ),
-      newStmtList(
-        newNimNode(nnkVarSection).add(
-          newIdentDefs(
-            ident("sss"),
-            (quote do: seq[Entity]),
-            prefix(newNimNode(nnkBracket), "@")
-          )
-        ),
-        newAssignment(smallestSetSym, newNimNode(nnkAddr).add(ident"sss"))
-      )
+  for i in rn:
+    result.add newBlockStmt(
+      genSym("i"),
+      quote do:
+        const idx = `i`
+        `body`
     )
-  )
-
-  result.add newNimNode(nnkDerefExpr).add(smallestSetSym)
     
 
+proc smallestSetOfEntities*(w: World[tuple], components: typedesc[tuple]): seq[Entity] =
+  unrollRange(0..<tupleLen(components)):
+    privateAccess(SparseSet[components.get(idx)])
+    if result.len < accessSparseSet(w, components.get(idx)).dmap.len:
+      result = accessSparseSet(w, components.get(idx)).dmap
 
 proc isVoid(T: NimNode): bool =
   if T == void.getTypeInst:
@@ -380,16 +355,30 @@ macro callSystemFn(
     for i in incl:
       if i.isVoid():
         continue
-      fCall.add newCall(
-        bindSym"hasComponent",
-        w,
-        e,
+
+      var wrap = if i.kind == nnkBracketExpr and i[0] == bindSym"Mut":
+        i[1]
+      else:
         i
+
+      fCall.add newCall(
+        wrap,
+        newCall(
+          bindSym"getComponent",
+          w,
+          e,
+          newCall(
+            bindSym"typeof",
+            i
+          )
+        )
       )
 
   result = genAst(cond, fCall):
     if cond:
       fCall
+
+  echo result.repr
 
 macro runSystem*(
   w: var World[tuple],
@@ -401,17 +390,15 @@ macro runSystem*(
     worldTuple = getTupleConstrNode(w.getTypeInst[1]).node
     componentsTuple = getTupleConstrNode(components).node
 
-  var
-    fnTyp = makeSystemFnType(worldTuple, componentsTuple)
-    smallestSet = smallestSetOfEntities(w, componentsTuple)
+  var fnTyp = makeSystemFnType(worldTuple, componentsTuple)
 
-  result = genAst(w, f, fnTyp, worldTuple, componentsTuple, smallestSet, orderedIteration):
+  result = genAst(w, f, fnTyp, worldTuple, componentsTuple, orderedIteration):
     when not compiles(fnTyp(f)):
       {.error: "`f` `" & $typeof(f) & "` is not of type: `" & $fnTyp & "`".}
     var
-      entities = smallestSet
+      entities = smallestSetOfEntities(w, componentsTuple)
       cmdBuf: CommandBuffer[worldTuple]
-    if orderedIteration:
+    when orderedIteration:
       entities.sort()
     for e in entities:
       cmdBuf &= callSystemFn(w, e, componentsTuple, f)

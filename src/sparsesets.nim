@@ -20,9 +20,6 @@ type
 
 const Sentinel* = int(uint32.high)
 
-template dmap*[T](ss: SparseSet[T]): seq[Entity] =
-  ## Impl detail, do not use.
-  ss.dmap
 
 proc contains*[T](ss: SparseSet[T], e: Entity): bool {.inline.} =
   ## Check if the entity is in the SparseSet
