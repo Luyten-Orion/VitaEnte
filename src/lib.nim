@@ -380,7 +380,7 @@ macro callSystemFn(
     if cond:
       fCall
 
-  echo result.repr
+  echo result.treeRepr
 
 macro runSystem*(
   w: var World[tuple],
