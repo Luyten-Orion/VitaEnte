@@ -3,6 +3,9 @@ when sizeof(int) != sizeof(int64):
   {.error: "Only 64-bit builds are supported."}
 
 type
+  # Placeholder until unit type comes along
+  Tag* = object
+
   Entity* = object
     id: uint32
 

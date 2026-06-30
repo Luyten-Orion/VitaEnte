@@ -167,6 +167,9 @@ template hasComponent[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): bool
 template hasComponent[T: tuple, U](w: World[T], e: Entity, _: U): bool =
   hasComponent(w, e, typeof(U))
 
+template getComponent[T: tuple, U](w: var World[T], e: Entity, _: typedesc[U]): var U =
+  accessSparseSet(w, typeof(U))[e]
+
 template getComponent[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): U =
   accessSparseSet(w, typeof(U))[e]
 
@@ -191,9 +194,9 @@ macro delComponents*[T: tuple](
       for component in components:
         w.delComponent(e, component))
 
-proc apply*[T: tuple](w: var World[T], cb: CommandBuffer[T]) =
+proc apply*[T: tuple](w: var World[T], cb: var CommandBuffer[T]) =
   # Uhhh how to wait?
-  if w.lock: raise newException(ConcurrentWorldAccessDefect)
+  if w.lock: raise newException(ConcurrentWorldAccessDefect, "Trying to apply while world is locked.")
   w.lock = true
   for command in cb:
     command(w)
@@ -282,7 +285,7 @@ proc smallestSetOfEntities*(w: World[tuple], components: typedesc[tuple]): seq[E
       result = accessSparseSet(w, components.get(idx)).dmap
 
 proc isVoid(T: NimNode): bool =
-  if T == void.getTypeInst:
+  if T == Tag.getTypeInst:
     return true
 
   if T.kind == nnkBracketExpr and T[0] == bindSym"Mut":
@@ -349,7 +352,6 @@ macro callSystemFn(
   else:
     fCall = newNimNode(nnkCall)
     fCall.add(f)
-    fCall.add(w)
     fCall.add(e)
 
     for i in incl:
@@ -379,6 +381,8 @@ macro callSystemFn(
   result = genAst(cond, fCall):
     if cond:
       fCall
+    else:
+      @[]
 
   echo result.treeRepr
 
@@ -420,9 +424,7 @@ type
   Velocity = object
     dx, dy: int
 
-  # Optional: a tag component (no data)
-  # In Nim, use `void` for tags
-  IsAlive = distinct void
+  IsAlive = distinct Tag
 
 # 2. Declare the tuple of all components your world can contain
 # Order doesn't matter, but must list every component type you'll use.
