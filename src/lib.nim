@@ -357,7 +357,9 @@ macro callSystemFn(
         continue
 
       var wrap = if i.kind == nnkBracketExpr and i[0] == bindSym"Mut":
-        i[1]
+        newNimNode(nnkVarTy).add(
+          i[1]
+        )
       else:
         i
 
