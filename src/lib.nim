@@ -78,19 +78,24 @@ type
   Command*[T: tuple] = proc (w: var World[T]) {.closure.}
   CommandBuffer*[T: tuple] = seq[Command[T]]
 
-proc accessSparseSet*[T: tuple, U](w: var World[T], _: typedesc[U]): var SparseSet[U] =
-  for _, sparseSet in w.sparseSets.fieldPairs:
-    when sparseSet is SparseSet[U]:
-      return sparseSet
+proc findComponentIndex(tupleType: NimNode, compType: NimNode): int =
+  var i = 0
 
-  raise newException(MissingComponentDefect, "There is no `" & $U & "` component in `" & $T & "`")
+  for child in getTupleBody(tupleType):
+    let typ = if child.kind == nnkIdentDefs: child[1] else: child
+    if sameType(compType, typ):
+      return i
+    inc i
 
-proc accessSparseSet*[T: tuple, U](w: World[T], _: typedesc[U]): SparseSet[U] =
-  for _, sparseSet in w.sparseSets.fieldPairs:
-    when sparseSet is SparseSet[U]:
-      return sparseSet
+  error("Component type not found", compType)
 
-  raise newException(MissingComponentDefect, "There is no `" & $U & "` component in `" & $T & "`")
+macro accessSparseSet*[T: tuple, U](w: var World[T], _: typedesc[U]): var SparseSet[U] =
+  let idx = findComponentIndex(w.getTypeInst[1], U.getTypeInst)
+  result = quote: `w`.sparseSets[`idx`]
+
+macro accessSparseSet*[T: tuple, U](w: World[T], _: typedesc[U]): SparseSet[U] =
+  let idx = findComponentIndex(w.getTypeInst[1], U.getTypeInst)
+  result = quote: `w`.sparseSets[`idx`]
 
 template addComponent[T: tuple, U](w: World[T], e: Entity, component: U) =
   accessSparseSet(w, typeof(U)).add(e, component)
