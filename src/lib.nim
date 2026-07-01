@@ -26,33 +26,6 @@ proc sparseSetFieldName(field: NimNode): string =
   name[0] = toLowerAscii(name[0])
   name & "Components"
 
-var
-  sparseSetCache {.compileTime.}: Table[LineInfo, NimNode]
-
-#[
-macro genSparseSetField[T](components: typedesc[T]): untyped {.used.} =
-  var (componentsNode, success) = getTupleConstrNode(components.getTypeImpl)
-
-  if not success:
-    error("Expected a tuple of components, such as `(Position, Velocity)`.")
-
-  for component in componentsNode:
-    if component.kind != nnkSym:
-      error("`genSparseSetField` doesn't work with generics for now.")
-
-  result = newNimNode(nnkTupleTy)
-
-  for component in componentsNode:
-    # TODO: Support generic types in the future
-    result.add(newIdentDefs(
-      ident(sparseSetFieldName(component)),
-      newNimNode(nnkBracketExpr).add(
-        bindSym"SparseSet",
-        component
-      )
-    ))
-]#
-
 proc getTupleBody(n: NimNode): NimNode =
   case n.kind
   of nnkTupleConstr, nnkTupleTy:
@@ -60,9 +33,8 @@ proc getTupleBody(n: NimNode): NimNode =
   of nnkSym:
     return getTupleBody(n.getImpl)
   of nnkTypeDef:
-    return getTupleBody(n[2])   # body is the third child
+    return getTupleBody(n[2])
   of nnkBracketExpr:
-    # typedesc[TupleType] or some other generic
     if n[0].kind == nnkSym and n[0].repr in ["typeDesc", "type"]:
       return getTupleBody(n[1])
     else:
