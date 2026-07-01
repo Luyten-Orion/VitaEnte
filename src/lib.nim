@@ -26,34 +26,10 @@ proc sparseSetFieldName(field: NimNode): string =
   name[0] = toLowerAscii(name[0])
   name & "Components"
 
-proc getTupleConstrNode(node: NimNode): tuple[node: NimNode, success: bool] =
-  result = (node, false)
-
-  while result.node.kind != nnkTupleConstr:
-    if result.node.kind == nnkBracketExpr:
-      result.node = result.node[1].getTypeImpl
-      continue
-    elif result.node.kind == nnkSym:
-      result.node = result.node.getImpl
-      continue
-    elif result.node.kind == nnkTypeDef:
-      result.node = result.node[2]
-      continue
-    else:
-      return
-
-  result.success = true
-
-proc typToTup(n: NimNode): NimNode =
-  if n.kind == nnkTupleConstr:
-    return n
-  result = newNimNode(nnkTupleConstr)
-  for i in n.getType[1].getType[1..^1]:
-    result.add i
-
 var
   sparseSetCache {.compileTime.}: Table[LineInfo, NimNode]
 
+#[
 macro genSparseSetField[T](components: typedesc[T]): untyped {.used.} =
   var (componentsNode, success) = getTupleConstrNode(components.getTypeImpl)
 
@@ -75,7 +51,43 @@ macro genSparseSetField[T](components: typedesc[T]): untyped {.used.} =
         component
       )
     ))
+]#
 
+proc getTupleBody(n: NimNode): NimNode =
+  case n.kind
+  of nnkTupleConstr, nnkTupleTy:
+    return n
+  of nnkSym:
+    return getTupleBody(n.getImpl)
+  of nnkTypeDef:
+    return getTupleBody(n[2])   # body is the third child
+  of nnkBracketExpr:
+    # typedesc[TupleType] or some other generic
+    if n[0].kind == nnkSym and n[0].repr in ["typeDesc", "type"]:
+      return getTupleBody(n[1])
+    else:
+      error("Expected a tuple type, got generic: " & n.repr)
+  else:
+    error("Expected a tuple type, got " & n.repr)
+
+macro genSparseSetField[T](components: typedesc[T]): untyped {.used.} =
+  let tupleBody = getTupleBody(components.getTypeImpl)
+
+  result = newNimNode(nnkTupleTy)
+  for child in tupleBody:
+    var typ: NimNode
+    if child.kind == nnkIdentDefs:
+      typ = child[1]          # named field
+    else:
+      typ = child             # unnamed field (the type itself)
+
+    # Allow common type nodes; generics may still be limited
+    if typ.kind notin {nnkSym, nnkIdent, nnkBracketExpr}:
+      error("Generic components not fully supported yet: " & typ.repr)
+
+    let fieldName = ident(sparseSetFieldName(typ))
+    let fieldType = newNimNode(nnkBracketExpr).add(bindSym"SparseSet", typ)
+    result.add(newIdentDefs(fieldName, fieldType))
 
 type
   ConcurrentWorldAccessDefect* = object of Defect
@@ -313,22 +325,6 @@ proc filterEntities*(w: World[tuple], components: typedesc[tuple]): seq[Entity] 
 
   result = candidateSet
 
-proc isVoid(T: NimNode): bool =
-  if T == Tag.getTypeInst:
-    return true
-
-  if T.kind == nnkBracketExpr and (T[0] == bindSym"Mut" or T[0] == bindSym"Not"):
-    return false
-
-  # Unfortunately, `getType` isn't very friendly to symbols
-  if T.kind == nnkIdent: return false
-  var Ti = T.getImpl
-
-  if Ti.kind != nnkTypeDef: return false
-  if Ti[2].kind != nnkDistinctTy: return false
-
-  return Ti[2][0].isVoid
-
 
 macro callSystemFn(
   w: var World[tuple],
@@ -336,30 +332,38 @@ macro callSystemFn(
   components: typedesc[tuple],
   f: proc
 ): CommandBuffer[tuple] =
+  let
+    fnType = f.getTypeImpl
+    formal = fnType[0]
+
+  var paramTypes: seq[NimNode]
+
+  for i in 1 ..< formal.len:
+    paramTypes.add(formal[i][1])
+
+  if paramTypes.len == 0:
+    error("System proc must take at least one parameter (`Entity`)")
+
   let fSym = genSym("f")
-  var fCall = newCall(fSym, e)
+  var call = newCall(fSym, e)
 
-  for typ in typToTup(components):
-    if typ.kind == nnkBracketExpr and typ[0] == bindSym"Not":
-      continue
-    var base = if typ.kind == nnkBracketExpr and typ[0] == bindSym"Mut":
-      typ[1]
-    else:
-      typ
-
-    if base.isVoid():
-      continue
-
-    fCall.add newCall(
+  for i in 1..<paramTypes.len:
+    let ptype = paramTypes[i]
+    let baseType = if ptype.kind == nnkVarTy: ptype[0] else: ptype
+    call.add newCall(
       bindSym"getComponent",
       w,
       e,
-      newCall(bindSym"typeof", base)
+      newCall(bindSym"typeof", baseType)
     )
 
-  result = genAst(fSym, fCall, f):
-    let fSym = f
-    fCall
+  result = newNimNode(nnkBlockStmt).add(
+    newEmptyNode(),
+    newStmtList(
+      newLetStmt(fSym, f),
+      call
+    )
+  )
 
 macro runSystem*(
   w: var World[tuple],
@@ -367,23 +371,15 @@ macro runSystem*(
   orderedIteration: bool,
   f: proc
 ) =
-  var
-    worldTuple = getTupleConstrNode(w.getTypeInst[1]).node
-    componentsTuple = getTupleConstrNode(components).node
-
-  var fnTyp = makeSystemFnType(worldTuple, componentsTuple)
-
-  result = genAst(w, f, fnTyp, worldTuple, componentsTuple, orderedIteration):
-    when not compiles(fnTyp(f)):
-      {.error: "`f` `" & $typeof(f) & "` is not of type: `" & $fnTyp & "`".}
+  let worldTuple = w.getTypeInst[1]
+  result = genAst(w, f, components, orderedIteration, worldTuple):
     var
-      entities = filterEntities(w, componentsTuple)
+      entities = filterEntities(w, components)
       cmdBuf: CommandBuffer[worldTuple]
     when orderedIteration:
       entities.sort()
     for e in entities:
-      cmdBuf &= callSystemFn(w, e, componentsTuple, f)
-    
+      cmdBuf &= callSystemFn(w, e, components, f)
     w.apply(cmdBuf)
 
 template runSystem*(
@@ -401,7 +397,7 @@ type
 
   IsAlive = distinct Tag
 
-type MyComponents = (Position, Velocity, IsAlive)
+type MyComponents = (Position, Velocity, IsAlive, seq[string])
 
 var world = World[MyComponents]()
 
@@ -414,6 +410,7 @@ let
 world.addComponents(e1, Position(x: 0, y: 0), Velocity(dx: 1, dy: 2), IsAlive)
 world.addComponents(e2, Position(x: 10, y: 10), Velocity(dx: -1, dy: 0))
 world.addComponent(e3, Position(x: 5, y: 5))
+world.addComponents(e4, @["hello", "world"])
 
 world.runSystem((Mut[Position], Mut[Velocity]),
   proc(e: Entity, pos: var Position, vel: var Velocity): CommandBuffer[MyComponents] =
@@ -429,4 +426,14 @@ world.runSystem((Position,), true,
 world.runSystem((Not[Position],), true,
   proc(e: Entity): CommandBuffer[MyComponents] =
     echo "Entity has no Position component."
+)
+
+world.runSystem((Mut[seq[string]],), true,
+  proc(e: Entity, msgs: var seq[string]): CommandBuffer[MyComponents] =
+    msgs.setLen(1)
+)
+
+world.runSystem((seq[string],), true,
+  proc(e: Entity, msgs: seq[string]): CommandBuffer[MyComponents] =
+    echo $e.id & ": " & msgs.join(", ")
 )
