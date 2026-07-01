@@ -13,7 +13,7 @@ import std/[
 
 from std/sugar import `=>`
 
-import vitaente/[
+import ./[
   sparsesets,
   core
 ]
@@ -79,6 +79,7 @@ macro genSparseSetField[T](components: typedesc[T]): untyped {.used.} =
 
 type
   ConcurrentWorldAccessDefect* = object of Defect
+  MissingComponentDefect* = object of Defect
 
   World*[T: tuple] = object
     entities*: seq[Entity]
@@ -93,59 +94,19 @@ type
   Command*[T: tuple] = proc (w: var World[T]) {.closure.}
   CommandBuffer*[T: tuple] = seq[Command[T]]
 
-#[
-proc accessSparseSetImpl*(w: NimNode, U: NimNode): NimNode =
-  template getTyp(typ: NimNode): NimNode =
-    if typ.kind == nnkBracketExpr:
-      if typ[0] == bindSym"Mut":
-        typ[1]
-      elif typ[0].repr.eqIdent("typedesc"):
-        typ[1]
-      else:
-        typ
-    else:
-      echo typ.treeRepr
-      typ
-
-  block checkComponentExists:
-    for typ in typToTup(w):
-      if getTyp(U).kind == nnkIdent:
-        if typ.repr.eqIdent(U.repr):
-          break checkComponentExists
-      else:
-        if getTyp(U) == typ:
-          break checkComponentExists
-    
-    error("There is no `" & getTyp(`U`).repr & "` component in `" & `w`.getTypeInst.repr & "`", callsite())
-
-  let sparseSet = sparseSetFieldName(getTyp(U))
-
-  result = newNimNode(nnkDotExpr).add(
-    newNimNode(nnkDotExpr).add(
-      w,
-      ident("sparseSets"),
-    ),
-    ident(sparseSet)
-  )
-
-macro accessSparseSet*(w: typed, U: typedesc): SparseSet[U] =
-  accessSparseSetImpl(w, U.getTypeInst)
-]#
-
 proc accessSparseSet*[T: tuple, U](w: var World[T], _: typedesc[U]): var SparseSet[U] =
   for _, sparseSet in w.sparseSets.fieldPairs:
     when sparseSet is SparseSet[U]:
       return sparseSet
 
-  error("There is no `" & $U & "` component in `" & $T & "`", callsite())
+  raise newException(MissingComponentDefect, "There is no `" & $U & "` component in `" & $T & "`")
 
 proc accessSparseSet*[T: tuple, U](w: World[T], _: typedesc[U]): SparseSet[U] =
   for _, sparseSet in w.sparseSets.fieldPairs:
     when sparseSet is SparseSet[U]:
       return sparseSet
 
-  error("There is no `" & $U & "` component in `" & $T & "`", callsite())
-
+  raise newException(MissingComponentDefect, "There is no `" & $U & "` component in `" & $T & "`")
 
 template addComponent[T: tuple, U](w: World[T], e: Entity, component: U) =
   accessSparseSet(w, typeof(U)).add(e, component)
@@ -174,25 +135,62 @@ template getComponent[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): U =
   accessSparseSet(w, typeof(U))[e]
 
 macro addComponents*[T: tuple](
+  w: World[T],
+  e: Entity,
+  components: varargs[untyped]
+): untyped =
+  result = newStmtList()
+
+  for component in components:
+    result.add quote do:
+      `w`.addComponent(`e`, `component`)
+
+macro delComponents*[T: tuple](
+  w: World[T],
+  e: Entity,
+  components: varargs[untyped]
+): untyped =
+  result = newStmtList()
+
+  for component in components:
+    result.add quote do:
+      `w`.delComponent(`e`, `component`)
+
+macro addComponents*[T: tuple](
   cb: CommandBuffer[T],
   e: Entity,
   components: varargs[untyped]
 ): untyped =
-  result = genAst:
-    cb.add (proc(w: var World[T]) =
-      for component in components:
-        w.addComponent(e, component))
+  var
+    stmts = newStmtList()
+    wSym = genSym("w")
+
+  for component in components:
+    stmts.add quote do:
+      `wSym`.addComponent(`e`, `component`)
+
+  result = quote do:
+    `cb`.add (proc(`wSym`: var World[`T`]) =
+      `stmts`
+    )
 
 macro delComponents*[T: tuple](
   cb: CommandBuffer[T],
   e: Entity,
   components: varargs[untyped]
 ): untyped =
-  var T = typToTup(cb)
-  result = genAst:
-    cb.add (proc(w: var World[T]) =
-      for component in components:
-        w.delComponent(e, component))
+  var
+    stmts = newStmtList()
+    wSym = genSym("w")
+
+  for component in components:
+    stmts.add quote do:
+      `wSym`.delComponent(`e`, `component`)
+
+  result = quote do:
+    `cb`.add (proc(`wSym`: var World[`T`]) =
+      `stmts`
+    )
 
 proc apply*[T: tuple](w: var World[T], cb: var CommandBuffer[T]) =
   # Uhhh how to wait?
@@ -278,19 +276,52 @@ macro unrollRange(rn: static HSlice[int, int], body: untyped) =
     )
     
 
-proc smallestSetOfEntities*(w: World[tuple], components: typedesc[tuple]): seq[Entity] =
+proc filterEntities*(w: World[tuple], components: typedesc[tuple]): seq[Entity] =
+  var
+    hasPositive = false
+    candidateSet: seq[Entity]
   unrollRange(0..<tupleLen(components)):
-    privateAccess(SparseSet[components.get(idx)])
-    if result.len < accessSparseSet(w, components.get(idx)).dmap.len:
-      result = accessSparseSet(w, components.get(idx)).dmap
+    type Comp = components.get(idx)
+    when not (Comp is Not):
+      hasPositive = true
+      type TupBase = (when Comp is Mut: Comp.distinctBase else: Comp)
+      privateAccess(SparseSet[TupBase])
+      let currentSet = accessSparseSet(w, TupBase).dmap
+      if candidateSet.len == 0:
+        candidateSet = currentSet
+      else:
+        # Intersect
+        var newSet: seq[Entity]
+        for e in candidateSet:
+          if e in currentSet:
+            newSet.add(e)
+        candidateSet = newSet
+  if not hasPositive:
+    candidateSet = w.entities
+
+  unrollRange(0..<tupleLen(components)):
+    type Comp = components.get(idx)
+    when Comp is Not:
+      type TupBase = Comp.distinctBase
+      privateAccess(SparseSet[TupBase])
+      let negativeSet = accessSparseSet(w, TupBase).dmap
+      var newSet: seq[Entity]
+      for e in candidateSet:
+        if e notin negativeSet:
+          newSet.add(e)
+      candidateSet = newSet
+
+  result = candidateSet
 
 proc isVoid(T: NimNode): bool =
   if T == Tag.getTypeInst:
     return true
 
-  if T.kind == nnkBracketExpr and T[0] == bindSym"Mut":
+  if T.kind == nnkBracketExpr and (T[0] == bindSym"Mut" or T[0] == bindSym"Not"):
     return false
 
+  # Unfortunately, `getType` isn't very friendly to symbols
+  if T.kind == nnkIdent: return false
   var Ti = T.getImpl
 
   if Ti.kind != nnkTypeDef: return false
@@ -305,86 +336,30 @@ macro callSystemFn(
   components: typedesc[tuple],
   f: proc
 ): CommandBuffer[tuple] =
-  var
-    excl: seq[NimNode]
-    incl: seq[NimNode]
-    condStmts: seq[NimNode]
-    cond: NimNode
+  let fSym = genSym("f")
+  var fCall = newCall(fSym, e)
 
   for typ in typToTup(components):
     if typ.kind == nnkBracketExpr and typ[0] == bindSym"Not":
-      excl.add(typ[1])
+      continue
+    var base = if typ.kind == nnkBracketExpr and typ[0] == bindSym"Mut":
+      typ[1]
     else:
-      incl.add(typ)
+      typ
 
-  for i in excl:
-    condStmts.add prefix(
-      newCall(
-        bindSym"hasComponent",
-        w,
-        e,
-        i
-      ),
-      "not"
-    )
-  
-  for i in incl:
-    condStmts.add newCall(
-      bindSym"hasComponent",
+    if base.isVoid():
+      continue
+
+    fCall.add newCall(
+      bindSym"getComponent",
       w,
       e,
-      if i.kind == nnkBracketExpr and i[0] == bindSym"Mut":
-        i[1]
-      else:
-        i
+      newCall(bindSym"typeof", base)
     )
 
-  if condStmts.len > 0:
-    cond = condStmts[0]
-    for i in 1..condStmts.high:
-      cond = infix(cond, "and", condStmts[i])
-  else:
-    cond = newLit(true)
-
-  var fCall: NimNode
-  if condStmts.len == 0:
-    fCall = genAst: f(w, e)
-  else:
-    fCall = newNimNode(nnkCall)
-    fCall.add(f)
-    fCall.add(e)
-
-    for i in incl:
-      if i.isVoid():
-        continue
-
-      var wrap = if i.kind == nnkBracketExpr and i[0] == bindSym"Mut":
-        newNimNode(nnkVarTy).add(
-          i[1]
-        )
-      else:
-        i
-
-      fCall.add newCall(
-        wrap,
-        newCall(
-          bindSym"getComponent",
-          w,
-          e,
-          newCall(
-            bindSym"typeof",
-            i
-          )
-        )
-      )
-
-  result = genAst(cond, fCall):
-    if cond:
-      fCall
-    else:
-      @[]
-
-  echo result.treeRepr
+  result = genAst(fSym, fCall, f):
+    let fSym = f
+    fCall
 
 macro runSystem*(
   w: var World[tuple],
@@ -402,7 +377,7 @@ macro runSystem*(
     when not compiles(fnTyp(f)):
       {.error: "`f` `" & $typeof(f) & "` is not of type: `" & $fnTyp & "`".}
     var
-      entities = smallestSetOfEntities(w, componentsTuple)
+      entities = filterEntities(w, componentsTuple)
       cmdBuf: CommandBuffer[worldTuple]
     when orderedIteration:
       entities.sort()
@@ -426,44 +401,32 @@ type
 
   IsAlive = distinct Tag
 
-# 2. Declare the tuple of all components your world can contain
-# Order doesn't matter, but must list every component type you'll use.
 type MyComponents = (Position, Velocity, IsAlive)
 
-# 3. Create the world
 var world = World[MyComponents]()
 
-# 4. Spawn some entities
-let e1 = world.spawn()[0]
-let e2 = world.spawn()[0]
-let e3 = world.spawn()[0]
+let
+  e1 = world.spawn()[0]
+  e2 = world.spawn()[0]
+  e3 = world.spawn()[0]
+  e4 = world.spawn()[0]
 
-# 5. Add components (data and tags)
-world.addComponent(e1, Position(x: 0, y: 0))
-world.addComponent(e1, Velocity(dx: 1, dy: 2))
-world.addComponent(e1, IsAlive)  # tag, no value
-
-world.addComponent(e2, Position(x: 10, y: 10))
-world.addComponent(e2, Velocity(dx: -1, dy: 0))
-
+world.addComponents(e1, Position(x: 0, y: 0), Velocity(dx: 1, dy: 2), IsAlive)
+world.addComponents(e2, Position(x: 10, y: 10), Velocity(dx: -1, dy: 0))
 world.addComponent(e3, Position(x: 5, y: 5))
-# e3 has no Velocity or IsAlive
 
-# 6. Define a system (using `runSystem` with a proc)
-# The proc signature: (world, entity, var comp1, var comp2, ...) -> CommandBuffer[MyComponents]
-# The system will run for every entity that has **all** the listed components.
-# Here we iterate over entities with both Position and Velocity.
 world.runSystem((Mut[Position], Mut[Velocity]),
   proc(e: Entity, pos: var Position, vel: var Velocity): CommandBuffer[MyComponents] =
-    # Update position
     pos.x += vel.dx
     pos.y += vel.dy
 )
 
-# 7. After running, check results
-for e in [e1, e2, e3]:
-  if world.hasComponent(e, Position):
-    let pos = world.getComponent(e, Position)
+world.runSystem((Position,), true,
+  proc(e: Entity, pos: Position): CommandBuffer[MyComponents] =
     echo "Entity ", e.id, " at (", pos.x, ", ", pos.y, ")"
-  else:
-    echo "Entity ", e.id, " has no Position"
+)
+
+world.runSystem((Not[Position],), true,
+  proc(e: Entity): CommandBuffer[MyComponents] =
+    echo "Entity has no Position component."
+)

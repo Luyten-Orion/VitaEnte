@@ -7,7 +7,7 @@ import std/[
   tables
 ]
 
-import vitaente/[
+import ./[
   core
 ]
 
