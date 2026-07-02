@@ -11,15 +11,13 @@ import std/[
   tables
 ]
 
-from std/sugar import `=>`
-
 import ./[
   sparsesets,
   core
 ]
 
 # Exporting core is important
-export core
+export sparsesets, core
 
 proc sparseSetFieldName(field: NimNode): string =
   var name = field.repr
@@ -42,7 +40,8 @@ proc getTupleBody(n: NimNode): NimNode =
   else:
     error("Expected a tuple type, got " & n.repr)
 
-macro genSparseSetField[T](components: typedesc[T]): untyped {.used.} =
+macro genSparseSetField*[T](components: typedesc[T]): untyped {.used.} =
+  ## Impl detail, do not use.
   let tupleBody = getTupleBody(components.getTypeImpl)
 
   result = newNimNode(nnkTupleTy)
@@ -97,16 +96,16 @@ macro accessSparseSet*[T: tuple, U](w: World[T], _: typedesc[U]): SparseSet[U] =
   let idx = findComponentIndex(w.getTypeInst[1], U.getTypeInst)
   result = quote: `w`.sparseSets[`idx`]
 
-template addComponent[T: tuple, U](w: World[T], e: Entity, component: U) =
+template addComponent*[T: tuple, U](w: World[T], e: Entity, component: U) =
   accessSparseSet(w, typeof(U)).add(e, component)
 
-template addComponent[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]) =
+template addComponent*[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]) =
   accessSparseSet(w, typeof(U)).add(e)
 
-template delComponent[T: tuple, U](w: World[T], e: Entity) =
+template delComponent*[T: tuple, U](w: World[T], e: Entity) {.used.} =
   accessSparseSet(w, typeof(U)).del(e)
 
-template hasComponent[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): bool =
+template hasComponent*[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): bool =
   when T is Mut:
     e in accessSparseSet(w, typeof(U.distinctBase))
   elif T is Not:
@@ -114,13 +113,13 @@ template hasComponent[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): bool
   else:
     e in accessSparseSet(w, typeof(U))
 
-template hasComponent[T: tuple, U](w: World[T], e: Entity, _: U): bool =
-  hasComponent(w, e, typeof(U))
+#template hasComponent[T: tuple, U](w: World[T], e: Entity, _: U): bool =
+#  hasComponent(w, e, typeof(U))
 
-template getComponent[T: tuple, U](w: var World[T], e: Entity, _: typedesc[U]): var U =
+template getComponent*[T: tuple, U](w: var World[T], e: Entity, _: typedesc[U]): var U =
   accessSparseSet(w, typeof(U))[e]
 
-template getComponent[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): U =
+template getComponent*[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): U =
   accessSparseSet(w, typeof(U))[e]
 
 macro addComponents*[T: tuple](
@@ -216,43 +215,6 @@ proc despawn*[T: tuple](w: var World[T], entities: seq[Entity]) =
     
   w.lock = false
 
-proc makeSystemFnType*(
-  a: NimNode, b: NimNode
-): NimNode =
-  result = newNimNode(nnkProcTy).add(
-    newNimNode(nnkFormalParams).add(
-      newNimNode(nnkBracketExpr).add(
-        bindSym"CommandBuffer",
-        a
-      ),
-      newIdentDefs(
-        ident("e"),
-        bindSym"Entity"
-      )
-    ),
-    newEmptyNode()
-  )
-
-  var i = 0
-
-  template getTyp(typ: NimNode): NimNode =
-    if typ.kind == nnkBracketExpr and typ[0] == bindSym"Mut":
-      newNimNode(nnkVarTy).add(typ[1])
-    else:
-      typ
-
-  for typ in b:
-    if typ.kind == nnkBracketExpr and typ[0] == bindSym"Not":
-      continue
-    inc i
-
-    result[0].add(
-      newIdentDefs(
-        ident("a" & $i),
-        getTyp(typ)
-      )
-    )
-
 macro unrollRange(rn: static HSlice[int, int], body: untyped) =
   result = newNimNode(nnkStmtList)
 
@@ -263,7 +225,6 @@ macro unrollRange(rn: static HSlice[int, int], body: untyped) =
         const idx = `i`
         `body`
     )
-    
 
 proc filterEntities*(w: World[tuple], components: typedesc[tuple]): seq[Entity] =
   var
@@ -285,8 +246,7 @@ proc filterEntities*(w: World[tuple], components: typedesc[tuple]): seq[Entity] 
           if e in currentSet:
             newSet.add(e)
         candidateSet = newSet
-  if not hasPositive:
-    candidateSet = w.entities
+  if not hasPositive: candidateSet = w.entities
 
   unrollRange(0..<tupleLen(components)):
     type Comp = components.get(idx)
@@ -364,53 +324,3 @@ template runSystem*(
   components: typedesc[tuple],
   f: proc
 ) = runSystem(w, components, false, f)
-
-type
-  Position = object
-    x, y: int
-
-  Velocity = object
-    dx, dy: int
-
-  IsAlive = distinct Tag
-
-type MyComponents = (Position, Velocity, IsAlive, seq[string])
-
-var world = World[MyComponents]()
-
-let
-  e1 = world.spawn()[0]
-  e2 = world.spawn()[0]
-  e3 = world.spawn()[0]
-  e4 = world.spawn()[0]
-
-world.addComponents(e1, Position(x: 0, y: 0), Velocity(dx: 1, dy: 2), IsAlive)
-world.addComponents(e2, Position(x: 10, y: 10), Velocity(dx: -1, dy: 0))
-world.addComponent(e3, Position(x: 5, y: 5))
-world.addComponents(e4, @["hello", "world", "all!"])
-
-world.runSystem((Mut[Position], Mut[Velocity]),
-  proc(e: Entity, pos: var Position, vel: var Velocity): CommandBuffer[MyComponents] =
-    pos.x += vel.dx
-    pos.y += vel.dy
-)
-
-world.runSystem((Position,), true,
-  proc(e: Entity, pos: Position): CommandBuffer[MyComponents] =
-    echo "Entity ", e.id, " at (", pos.x, ", ", pos.y, ")"
-)
-
-world.runSystem((Not[Position],), true,
-  proc(e: Entity): CommandBuffer[MyComponents] =
-    echo "Entity ", e.id, " has no Position component."
-)
-
-world.runSystem((Mut[seq[string]],), true,
-  proc(e: Entity, msgs: var seq[string]): CommandBuffer[MyComponents] =
-    msgs.setLen(1)
-)
-
-world.runSystem((seq[string],), true,
-  proc(e: Entity, msgs: seq[string]): CommandBuffer[MyComponents] =
-    echo $e.id & ": " & msgs.join(", ")
-)
