@@ -62,8 +62,6 @@ proc del*[T](ss: var SparseSet[T], e: Entity) =
   ## Swap-and-pop entity deletion.
   if e notin ss: return
 
-  if int(e.id) notin ss.smap: return
-
   let
     idxToRemove = ss.smap[e.id]
     lastEntity = ss.dmap[^1]
