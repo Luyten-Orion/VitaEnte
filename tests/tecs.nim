@@ -11,7 +11,7 @@ type
   Velocity = object
     dx, dy: int
 
-  IsAlive = distinct Tag
+  IsAlive = distinct Unit
 
 type MyComponents = (Position, Velocity, IsAlive, seq[string])
 

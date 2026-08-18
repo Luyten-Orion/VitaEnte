@@ -15,7 +15,7 @@ type
   SparseSet*[T] = object
     smap: seq[int]       # Entity -> Dense
     dmap: seq[Entity]   # Dense -> Entity
-    when T isnot Tag or T.distinctBase isnot Tag:
+    when T isnot Unit or T.distinctBase isnot Unit:
       components: seq[T] # Data
 
 const Sentinel* = int(uint32.high)
@@ -44,7 +44,7 @@ template sparseAddImpl(ss: var SparseSet, e: Entity, body) =
 
 proc add*[T](ss: var SparseSet[T], e: Entity, val: T) =
   ## Add a component to an entity.
-  when T is Tag or T.distinctBase is Tag:
+  when T is Unit or T.distinctBase is Unit:
     # This shouldn't compile anyway
     {.error: "Can't accept a void value when a value is required.".}
 
@@ -52,8 +52,8 @@ proc add*[T](ss: var SparseSet[T], e: Entity, val: T) =
     ss.components.add(val)
 
 proc add*[T](ss: var SparseSet[T], e: Entity) =
-  ## Add a 'tag' component (no data) to an entity.
-  when not (T is Tag or T.distinctBase is Tag):
+  ## Add a 'Unit' component (no data) to an entity.
+  when not (T is Unit or T.distinctBase is Unit):
     {.error: "Can't accept a value when no value is required.".}
   sparseAddImpl(ss, e):
     discard
@@ -62,7 +62,7 @@ proc del*[T](ss: var SparseSet[T], e: Entity) =
   ## Swap-and-pop entity deletion.
   if e notin ss: return
 
-  if e.id notin ss.smap: return
+  if int(e.id) notin ss.smap: return
 
   let
     idxToRemove = ss.smap[e.id]
@@ -71,7 +71,7 @@ proc del*[T](ss: var SparseSet[T], e: Entity) =
   ss.dmap[idxToRemove] = lastEntity
   ss.smap[lastEntity.id] = idxToRemove
   
-  when T isnot Tag or T.distinctBase isnot Tag:
+  when T isnot Unit or T.distinctBase isnot Unit:
     ss.components[idxToRemove] = ss.components[^1]
     ss.components.setLen(ss.components.len - 1)
 
@@ -80,21 +80,21 @@ proc del*[T](ss: var SparseSet[T], e: Entity) =
 
 template `[]`*[T](ss: var SparseSet[T], e: Entity): var T =
   ## Direct access to component data.
-  when T is Tag or T.distinctBase is Tag:
+  when T is Unit or T.distinctBase is Unit:
     {.error: "Cannot access void value in a SparseSet that requires data."}
   assert e in ss, "Attempted to access non-existent component for Entity " & $e.id
   ss.components[ss.smap[e.id]]
 
 template `[]`*[T](ss: SparseSet[T], e: Entity): T =
   ## Direct access to component data.
-  when T is Tag or T.distinctBase is Tag:
+  when T is Unit or T.distinctBase is Unit:
     {.error: "Cannot access void value in a SparseSet that requires data."}
   assert e in ss, "Attempted to access non-existent component for Entity " & $e.id
   ss.components[ss.smap[e.id]]
 
 template `[]=`*[T](ss: var SparseSet[T], e: Entity, val: T) =
   ## Direct update of component data.
-  when T is Tag or T.distinctBase is Tag:
+  when T is Unit or T.distinctBase is Unit:
     # Should never be possible anyway
     {.error: "Cannot access void value in a SparseSet that requires data."}
   assert e in ss, "Attempted to assign to non-existent component for Entity " & $e.id

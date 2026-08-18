@@ -4,7 +4,7 @@ when sizeof(int) != sizeof(int64):
 
 type
   # Placeholder until unit type comes along
-  Tag* = object
+  Unit* = tuple[]
 
   Entity* = object
     id: uint32

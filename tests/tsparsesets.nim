@@ -121,13 +121,11 @@ suite "SparseSet[non-void]":
     check ss[e] == 123
     check ss.dmap.len == 1
 
-suite "SparseSet[void] (tag components)":
+suite "SparseSet[void] (Unit components)":
   setup:
     privateAccess(SparseSet)
-    type Tag = void
-
   test "add and contains":
-    var ss = SparseSet[Tag]()
+    var ss = SparseSet[Unit]()
     let
       e1 = Entity.init(0)
       e2 = Entity.init(3)
@@ -140,7 +138,7 @@ suite "SparseSet[void] (tag components)":
     check Entity.init(1) notin ss
 
   test "add duplicate does nothing":
-    var ss = SparseSet[Tag]()
+    var ss = SparseSet[Unit]()
     let e = Entity.init(5)
 
     ss.add(e)
@@ -149,7 +147,7 @@ suite "SparseSet[void] (tag components)":
     check ss.dmap.len == 1
 
   test "delete":
-    var ss = SparseSet[Tag]()
+    var ss = SparseSet[Unit]()
     let
       e1 = Entity.init(0)
       e2 = Entity.init(1)
@@ -165,7 +163,7 @@ suite "SparseSet[void] (tag components)":
     check ss.dmap[0] == e2
 
   test "delete last element":
-    var ss = SparseSet[Tag]()
+    var ss = SparseSet[Unit]()
     let e = Entity.init(0)
 
     ss.add(e)
