@@ -89,11 +89,15 @@ proc findComponentIndex(tupleType: NimNode, compType: NimNode): int =
   error("Component type not found", compType)
 
 macro accessSparseSet*[T: tuple, U](w: var World[T], _: typedesc[U]): var SparseSet[U] =
-  let idx = findComponentIndex(w.getTypeInst[1], U.getTypeInst)
+  let
+    tupleType = nnkTupleConstr.newTree(w.getType[1][1..^1])
+    idx = findComponentIndex(tupleType, U.getTypeInst)
   result = quote: `w`.sparseSets[`idx`]
 
 macro accessSparseSet*[T: tuple, U](w: World[T], _: typedesc[U]): SparseSet[U] =
-  let idx = findComponentIndex(w.getTypeInst[1], U.getTypeInst)
+  let
+    tupleType = nnkTupleConstr.newTree(w.getType[1][1..^1])
+    idx = findComponentIndex(tupleType, U.getTypeInst)
   result = quote: `w`.sparseSets[`idx`]
 
 template addComponent*[T: tuple, U](w: World[T], e: Entity, component: U) =
