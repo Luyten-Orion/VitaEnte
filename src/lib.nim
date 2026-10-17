@@ -113,7 +113,7 @@ template addComponent*[T: tuple, U](w: World[T], e: Entity, component: U) =
 template addComponent*[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]) =
   accessSparseSet(w, typeof(U)).add(e)
 
-template delComponent*[T: tuple, U](w: World[T], e: Entity) {.used.} =
+template delComponent*[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]) {.used.} =
   accessSparseSet(w, typeof(U)).del(e)
 
 template hasComponent*[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): bool =
