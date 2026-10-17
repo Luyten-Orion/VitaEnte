@@ -77,6 +77,13 @@ type
   Command*[T: tuple] = proc (w: var World[T]) {.closure.}
   CommandBuffer*[T: tuple] = seq[Command[T]]
 
+# distinctBase peels every distinct layer at once, so a Not/Mut wrapper around
+# a distinct component resolves to its base's sparse set instead (or fails to
+# find it entirely). Peel exactly one wrapper layer instead.
+template componentType[T](x: typedesc[Mut[T]]): untyped = T
+template componentType[T](x: typedesc[Not[T]]): untyped = T
+template componentType[T](x: typedesc[T]): untyped = T
+
 proc findComponentIndex(tupleType: NimNode, compType: NimNode): int =
   var i = 0
 
@@ -111,9 +118,9 @@ template delComponent*[T: tuple, U](w: World[T], e: Entity) {.used.} =
 
 template hasComponent*[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): bool =
   when T is Mut:
-    e in accessSparseSet(w, typeof(U.distinctBase))
+    e in accessSparseSet(w, componentType(U))
   elif T is Not:
-    not (e in accessSparseSet(w, typeof(U.distinctBase)))
+    not (e in accessSparseSet(w, componentType(U)))
   else:
     e in accessSparseSet(w, typeof(U))
 
@@ -238,7 +245,7 @@ proc filterEntities*(w: World[tuple], components: typedesc[tuple]): seq[Entity] 
     type Comp = components.get(idx)
     when not (Comp is Not):
       hasPositive = true
-      type TupBase = (when Comp is Mut: Comp.distinctBase else: Comp)
+      type TupBase = componentType(Comp)
       privateAccess(SparseSet[TupBase])
       let currentSet = accessSparseSet(w, TupBase).dmap
       if candidateSet.len == 0:
@@ -255,7 +262,7 @@ proc filterEntities*(w: World[tuple], components: typedesc[tuple]): seq[Entity] 
   unrollRange(0..<tupleLen(components)):
     type Comp = components.get(idx)
     when Comp is Not:
-      type TupBase = Comp.distinctBase
+      type TupBase = componentType(Comp)
       privateAccess(SparseSet[TupBase])
       let negativeSet = accessSparseSet(w, TupBase).dmap
       var newSet: seq[Entity]
