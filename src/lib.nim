@@ -117,10 +117,10 @@ template delComponent*[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]) {.us
   accessSparseSet(w, typeof(U)).del(e)
 
 template hasComponent*[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]): bool =
-  when T is Mut:
-    e in accessSparseSet(w, componentType(U))
-  elif T is Not:
-    not (e in accessSparseSet(w, componentType(U)))
+  when U is Mut:
+    e in accessSparseSet(w, componentType(typeof(U)))
+  elif U is Not:
+    not (e in accessSparseSet(w, componentType(typeof(U))))
   else:
     e in accessSparseSet(w, typeof(U))
 
