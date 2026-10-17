@@ -195,10 +195,12 @@ proc apply*[T: tuple](w: var World[T], cb: var CommandBuffer[T]) =
   # Uhhh how to wait?
   if w.lock: raise newException(ConcurrentWorldAccessDefect, "Trying to apply while world is locked.")
   w.lock = true
-  for command in cb:
-    command(w)
-  cb.setLen(0)
-  w.lock = false
+  try:
+    for command in cb:
+      command(w)
+    cb.setLen(0)
+  finally:
+    w.lock = false
 
 proc spawn*[T: tuple](w: var World[T], count: Natural = 1): seq[Entity] =
   # TODO: Make this check happen in release builds?
@@ -210,21 +212,26 @@ proc spawn*[T: tuple](w: var World[T], count: Natural = 1): seq[Entity] =
     {.error: "Only 64-bit builds are supported."}
 
   result = newSeq[Entity](count)
-  for i in 0..<count:
-    result[i] = Entity.init(uint32(w.entities.len))
-    w.entities.add(result[i])
-  w.lock = false
+  try:
+    for i in 0..<count:
+      result[i] = Entity.init(uint32(w.entities.len))
+      w.entities.add(result[i])
+  finally:
+    w.lock = false
 
 proc despawn*[T: tuple](w: var World[T], entities: seq[Entity]) =
   if w.lock: raise newException(ConcurrentWorldAccessDefect, "Trying to despawn while world is locked.")
   w.lock = true
-  for e in entities:
-    # TODO: Find a better way to mass-delete entities, perhaps find all the indices and delete in reverse?
-    w.entities.del(w.entities.find(e))
-    for name, field in w.sparseSets.fieldPairs:
-      field.del(e) # no-op if not present
-    
-  w.lock = false
+  try:
+    for e in entities:
+      # TODO: Find a better way to mass-delete entities, perhaps find all the indices and delete in reverse?
+      let idx = w.entities.find(e)
+      if idx < 0: continue # despawning an unknown entity is a no-op
+      w.entities.del(idx)
+      for name, field in w.sparseSets.fieldPairs:
+        field.del(e) # no-op if not present
+  finally:
+    w.lock = false
 
 macro unrollRange(rn: static HSlice[int, int], body: untyped) =
   result = newNimNode(nnkStmtList)
