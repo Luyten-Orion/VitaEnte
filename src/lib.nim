@@ -248,6 +248,7 @@ proc filterEntities*(w: World[tuple], components: typedesc[tuple]): seq[Entity] 
   var
     hasPositive = false
     candidateSet: seq[Entity]
+    candidateSetInit = false
   unrollRange(0..<tupleLen(components)):
     type Comp = components.get(idx)
     when not (Comp is Not):
@@ -255,9 +256,10 @@ proc filterEntities*(w: World[tuple], components: typedesc[tuple]): seq[Entity] 
       type TupBase = componentType(Comp)
       privateAccess(SparseSet[TupBase])
       let currentSet = accessSparseSet(w, TupBase).dmap
-      if candidateSet.len == 0:
+      if not candidateSetInit:
         candidateSet = currentSet
-      else:
+        candidateSetInit = true
+      elif candidateSet.len > 0:
         # Intersect
         var newSet: seq[Entity]
         for e in candidateSet:
