@@ -69,7 +69,7 @@ proc del*[T](ss: var SparseSet[T], e: Entity) =
   ss.dmap[idxToRemove] = lastEntity
   ss.smap[lastEntity.id] = idxToRemove
   
-  when T isnot Unit or T.distinctBase isnot Unit:
+  when not (T is Unit or T.distinctBase is Unit):
     ss.components[idxToRemove] = ss.components[^1]
     ss.components.setLen(ss.components.len - 1)
 
