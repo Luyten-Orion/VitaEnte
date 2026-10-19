@@ -20,15 +20,25 @@ type
 
 const Sentinel* = int(uint32.high)
 
+type
+  # Raised when a component op arrives with a dead or stale handle
+  StaleEntityDefect* = object of Defect
+
 
 proc contains*[T](ss: SparseSet[T], e: Entity): bool {.inline.} =
   ## Check if the entity is in the SparseSet
+  # Compare the full entity; ids get recycled
   assert ss.smap.len < Sentinel
-  int(e.id) < ss.smap.len and ss.smap[e.id] != Sentinel
+  int(e.id) < ss.smap.len and ss.smap[e.id] != Sentinel and
+    ss.dmap[ss.smap[e.id]] == e
 
-# TODO: Add a simple guard that you can't add duplicate entities
 template sparseAddImpl(ss: var SparseSet, e: Entity, body) =
   if e in ss: return
+  # The id's slot is taken but not by this entity, so e is a stale handle
+  # of a recycled id; adding through it would orphan the new owner's entry
+  if int(e.id) < ss.smap.len and ss.smap[e.id] != Sentinel:
+    raise newException(StaleEntityDefect,
+      "addComponent via stale handle of recycled id " & $e.id)
 
   # Init empty slots with the sentinel
   if int(e.id) >= ss.smap.len:

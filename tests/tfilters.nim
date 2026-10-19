@@ -70,9 +70,20 @@ suite "Unit-shaped components survive deletion":
     let e = w.spawn()[0]
     w.addComponent(e, IsTag)
     w.despawn(@[e])
-    check w.entities.len == 0
+    check not w.live(e)
 
 suite "Public component deletion":
+  test "add with a stale handle of a recycled id raises":
+    var w = World[TF]()
+    let
+      a = w.spawn()[0]
+      _ = w.spawn()[0] # a second entity so ids differ from len bookkeeping
+    w.despawn(@[a])
+    let fresh = w.spawn()[0] # recycles a's id
+    check fresh.id == a.id
+    expect StaleEntityDefect:
+      w.addComponent(a, Pair(x: 0, y: 0))
+
   test "delComponent takes the type explicitly":
     var w = World[TF]()
     let e = w.spawn()[0]

@@ -66,8 +66,11 @@ type
 
   World*[T: tuple] = object
     entities*: seq[Entity]
+    # Dead ids, ready for recycling. Each entry carries the generation its id
+    # should wear when reborn (its slot in `entities` already wears that value).
+    freeList*: seq[Entity]
     sparseSets*: genSparseSetField(T)
-    # TODO: Replace with proper lock?
+    # Reentrancy tripwire only; worlds stay thread-owned
     lock*: bool
 
   Not*[T] = distinct T
@@ -77,9 +80,10 @@ type
   Command*[T: tuple] = proc (w: var World[T]) {.closure.}
   CommandBuffer*[T: tuple] = seq[Command[T]]
 
-# distinctBase peels every distinct layer at once, so a Not/Mut wrapper around
-# a distinct component resolves to its base's sparse set instead (or fails to
-# find it entirely). Peel exactly one wrapper layer instead.
+# distinctBase resolves through every distinct layer at once, so a Not/Mut
+# wrapper around a distinct component would land on the base's sparse set
+# instead (or find nothing at all). componentType unwraps the single wrapper
+# layer it needs and stops there.
 template componentType[T](x: typedesc[Mut[T]]): untyped = T
 template componentType[T](x: typedesc[Not[T]]): untyped = T
 template componentType[T](x: typedesc[T]): untyped = T
@@ -107,10 +111,19 @@ macro accessSparseSet*[T: tuple, U](w: World[T], _: typedesc[U]): SparseSet[U] =
     idx = findComponentIndex(tupleType, U.getTypeInst)
   result = quote: `w`.sparseSets[`idx`]
 
+template checkLive[T: tuple](w: World[T], e: Entity) =
+  # A dead handle can only get worse once it's inside a sparse set, so the
+  # world itself has to veto it
+  if not w.live(e):
+    raise newException(StaleEntityDefect,
+      "component op on dead entity, id " & $e.id)
+
 template addComponent*[T: tuple, U](w: World[T], e: Entity, component: U) =
+  checkLive(w, e)
   accessSparseSet(w, typeof(U)).add(e, component)
 
 template addComponent*[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]) =
+  checkLive(w, e)
   accessSparseSet(w, typeof(U)).add(e)
 
 template delComponent*[T: tuple, U](w: World[T], e: Entity, _: typedesc[U]) {.used.} =
@@ -150,7 +163,6 @@ macro delComponents*[T: tuple](
   components: varargs[untyped]
 ): untyped =
   result = newStmtList()
-
   for component in components:
     result.add quote do:
       `w`.delComponent(`e`, `component`)
@@ -202,36 +214,38 @@ proc apply*[T: tuple](w: var World[T], cb: var CommandBuffer[T]) =
   finally:
     w.lock = false
 
+# Ids are slot indices, the entities seq never shrinks, and despawned slots
+# wait at gen 0 to be recycled. Stale handles can never match a live entity
+# again, so spawn/despawn are also safe inside command buffers (nothing
+# shifts under a running sweep)
+proc live*[T: tuple](w: World[T], e: Entity): bool {.inline.} =
+  e.id < w.entities.len.uint32 and w.entities[e.id.int].gen == e.gen
+
 proc spawn*[T: tuple](w: var World[T], count: Natural = 1): seq[Entity] =
-  # TODO: Make this check happen in release builds?
-  if w.lock: raise newException(ConcurrentWorldAccessDefect, "Trying to spawn while world is locked.")
-  w.lock = true
   when sizeof(int) == 8:
     assert w.entities.len + count <= high(uint32).int
   else:
     {.error: "Only 64-bit builds are supported."}
 
   result = newSeq[Entity](count)
-  try:
-    for i in 0..<count:
+  for i in 0..<count:
+    if w.freeList.len > 0:
+      let recycled = w.freeList.pop()
+      w.entities[recycled.id.int].revive(recycled.gen)
+      result[i] = recycled
+    else:
       result[i] = Entity.init(uint32(w.entities.len))
       w.entities.add(result[i])
-  finally:
-    w.lock = false
+
+proc despawnOne*[T: tuple](w: var World[T], e: Entity) =
+  if not w.live(e): return # unknown or stale id is a no-op
+  w.freeList.add(w.entities[e.id.int].kill()) # carries its next generation
+  for name, field in w.sparseSets.fieldPairs:
+    field.del(e) # no-op if not present
 
 proc despawn*[T: tuple](w: var World[T], entities: seq[Entity]) =
-  if w.lock: raise newException(ConcurrentWorldAccessDefect, "Trying to despawn while world is locked.")
-  w.lock = true
-  try:
-    for e in entities:
-      # TODO: Find a better way to mass-delete entities, perhaps find all the indices and delete in reverse?
-      let idx = w.entities.find(e)
-      if idx < 0: continue # despawning an unknown entity is a no-op
-      w.entities.del(idx)
-      for name, field in w.sparseSets.fieldPairs:
-        field.del(e) # no-op if not present
-  finally:
-    w.lock = false
+  for e in entities:
+    w.despawnOne(e)
 
 macro unrollRange(rn: static HSlice[int, int], body: untyped) =
   result = newNimNode(nnkStmtList)
